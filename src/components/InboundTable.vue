@@ -7,6 +7,7 @@ const props = defineProps<{
   connections: InboundConnection[]
   isLoading: boolean
   selectedConnection: InboundConnection | null
+  grouped: boolean
 }>()
 
 const emit = defineEmits<{
@@ -16,9 +17,10 @@ const emit = defineEmits<{
 type SortKey = 'process' | 'local_port' | 'local_ip' | 'state'
 const sortKey = ref<SortKey>('state')
 const sortAsc = ref(true)
+const collapsed = ref(new Set<string>())
 
-const sorted = computed(() =>
-  [...props.connections].sort((a, b) => {
+function sortItems(items: InboundConnection[]): InboundConnection[] {
+  return [...items].sort((a, b) => {
     const av = a[sortKey.value]
     const bv = b[sortKey.value]
     const cmp = typeof av === 'number'
@@ -26,7 +28,20 @@ const sorted = computed(() =>
       : String(av).localeCompare(String(bv))
     return sortAsc.value ? cmp : -cmp
   })
-)
+}
+
+const sorted = computed(() => sortItems(props.connections))
+
+const groups = computed(() => {
+  const map = new Map<string, InboundConnection[]>()
+  for (const c of props.connections) {
+    if (!map.has(c.process)) map.set(c.process, [])
+    map.get(c.process)!.push(c)
+  }
+  return [...map.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([name, items]) => ({ name, items: sortItems(items) }))
+})
 
 function setSort(key: SortKey) {
   if (sortKey.value === key) {
@@ -35,6 +50,12 @@ function setSort(key: SortKey) {
     sortKey.value = key
     sortAsc.value = true
   }
+}
+
+function toggleGroup(name: string) {
+  const next = new Set(collapsed.value)
+  next.has(name) ? next.delete(name) : next.add(name)
+  collapsed.value = next
 }
 
 function portLabel(port: number): string {
@@ -86,7 +107,63 @@ function rowClass(c: InboundConnection): string {
           <th></th>
         </tr>
       </thead>
-      <tbody>
+
+      <!-- Grouped mode -->
+      <tbody v-if="grouped">
+        <template v-for="group in groups" :key="group.name">
+          <tr class="group-header" @click="toggleGroup(group.name)">
+            <td colspan="7">
+              <div class="group-header-content">
+                <span class="chevron" :class="{ open: !collapsed.has(group.name) }">›</span>
+                <span class="group-name">{{ group.name }}</span>
+                <span class="group-count">{{ group.items.length }}</span>
+              </div>
+            </td>
+          </tr>
+          <template v-if="!collapsed.has(group.name)">
+            <tr
+              v-for="(c, i) in group.items"
+              :key="i"
+              :class="rowClass(c)"
+              @click="emit('select', c)"
+            >
+              <td class="process muted-cell" :title="c.process">{{ c.process }}</td>
+              <td class="pid mono">{{ c.pid }}</td>
+              <td class="ip mono">
+                <span
+                  class="interface-badge"
+                  :class="{ all: c.is_all_interfaces, local: c.is_localhost_only }"
+                  :title="c.local_ip"
+                >
+                  {{ c.is_all_interfaces ? '*' : c.local_ip }}
+                </span>
+              </td>
+              <td class="port">
+                <span class="port-badge" :class="{ encrypted: c.is_encrypted }">
+                  {{ portLabel(c.local_port) }}
+                </span>
+              </td>
+              <td class="remote mono">
+                <template v-if="c.remote_ip">{{ c.remote_ip }}:{{ c.remote_port }}</template>
+                <span v-else class="muted">—</span>
+              </td>
+              <td class="state">
+                <span class="state-badge" :class="c.state.toLowerCase()">{{ c.state }}</span>
+              </td>
+              <td class="action">
+                <button
+                  class="inspect-btn"
+                  @click.stop="emit('select', c)"
+                  :title="c.state === 'LISTEN' ? 'Inspect service' : 'Investigate remote IP'"
+                >⌖</button>
+              </td>
+            </tr>
+          </template>
+        </template>
+      </tbody>
+
+      <!-- Flat mode -->
+      <tbody v-else>
         <tr
           v-for="(c, i) in sorted"
           :key="i"
@@ -121,9 +198,7 @@ function rowClass(c: InboundConnection): string {
               class="inspect-btn"
               @click.stop="emit('select', c)"
               :title="c.state === 'LISTEN' ? 'Inspect service' : 'Investigate remote IP'"
-            >
-              ⌖
-            </button>
+            >⌖</button>
           </td>
         </tr>
       </tbody>
@@ -171,6 +246,50 @@ td {
   white-space: nowrap;
 }
 
+/* Group header row */
+.group-header {
+  cursor: pointer;
+  user-select: none;
+}
+.group-header td {
+  padding: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.group-header:hover td { filter: brightness(1.06); }
+
+.group-header-content {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+}
+
+.chevron {
+  color: var(--muted);
+  font-size: 13px;
+  display: inline-block;
+  transition: transform 0.15s;
+  line-height: 1;
+}
+.chevron.open { transform: rotate(90deg); }
+
+.group-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.group-count {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: var(--border);
+  color: var(--muted);
+}
+
+/* Row states */
 .row { cursor: pointer; transition: background 0.1s; }
 .row:hover { background: var(--surface-2); }
 .row.exposed { background: rgba(210, 153, 34, 0.08); }
@@ -182,6 +301,7 @@ td {
 .row.selected { background: rgba(88, 166, 255, 0.18) !important; outline: 1px solid var(--accent); }
 
 .process { max-width: 120px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; }
+.muted-cell { color: var(--muted); font-weight: 400; }
 .pid { color: var(--muted); }
 .mono { font-family: 'SF Mono', 'Menlo', monospace; }
 .remote { font-family: 'SF Mono', 'Menlo', monospace; font-size: 11px; color: var(--muted); }

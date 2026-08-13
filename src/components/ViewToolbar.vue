@@ -5,6 +5,7 @@ defineProps<{
   autoRefresh: boolean
   refreshInterval: number
   isLoading: boolean
+  grouped: boolean
 }>()
 
 defineEmits<{
@@ -12,6 +13,7 @@ defineEmits<{
   'update:showLocal': [v: boolean]
   'update:autoRefresh': [v: boolean]
   'update:refreshInterval': [v: number]
+  'update:grouped': [v: boolean]
   refresh: []
 }>()
 </script>
@@ -27,6 +29,21 @@ defineEmits<{
     />
 
     <div class="controls">
+      <button
+        class="group-btn"
+        :class="{ active: grouped }"
+        title="Toggle group by process"
+        @click="$emit('update:grouped', !grouped)"
+      >
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+          <rect x="1" y="1" width="6" height="6" rx="1"/>
+          <rect x="9" y="1" width="6" height="6" rx="1"/>
+          <rect x="1" y="9" width="6" height="6" rx="1"/>
+          <rect x="9" y="9" width="6" height="6" rx="1"/>
+        </svg>
+        Group
+      </button>
+
       <label class="toggle-label">
         <input
           type="checkbox"
@@ -89,6 +106,28 @@ defineEmits<{
 .search::placeholder { color: var(--muted); }
 
 .controls { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+
+.group-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 4px 10px;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+  font-family: inherit;
+}
+.group-btn:hover { color: var(--text); border-color: var(--muted); }
+.group-btn.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(88, 166, 255, 0.08);
+}
 
 .toggle-label {
   display: flex;

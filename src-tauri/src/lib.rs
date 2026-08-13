@@ -699,6 +699,7 @@ async fn start_ws_server(app_handle: tauri::AppHandle) {
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(start_ws_server(handle));

@@ -21,6 +21,7 @@ const { selectedIp, selectedPort, investigation, isInvestigating, investigate, c
   useInvestigation()
 
 const search = ref('')
+const grouped = ref(false)
 
 const filtered = computed(() => {
   const q = search.value.toLowerCase()
@@ -41,6 +42,7 @@ const httpsCount = computed(() => filtered.value.filter(c => c.is_https).length)
       v-model:show-local="showLocal"
       v-model:auto-refresh="autoRefresh"
       v-model:refresh-interval="refreshInterval"
+      v-model:grouped="grouped"
       :is-loading="isLoading"
       @refresh="fetch"
     />
@@ -50,6 +52,7 @@ const httpsCount = computed(() => filtered.value.filter(c => c.is_https).length)
         :connections="filtered"
         :is-loading="isLoading"
         :selected-ip="selectedIp"
+        :grouped="grouped"
         @investigate="investigate"
       />
       <Transition name="panel">

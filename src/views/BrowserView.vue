@@ -8,6 +8,7 @@ import type { BrowserRequest } from '../types'
 const { requests, extensionConnected, totalBytes, clear } = useBrowser()
 
 const search = ref('')
+const grouped = ref(false)
 const selectedRequest = ref<BrowserRequest | null>(null)
 
 const filtered = computed(() => {
@@ -50,6 +51,20 @@ function formatBytes(bytes: number): string {
       </div>
 
       <div class="toolbar-right">
+        <button
+          class="group-btn"
+          :class="{ active: grouped }"
+          title="Toggle group by domain"
+          @click="grouped = !grouped"
+        >
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+            <rect x="1" y="1" width="6" height="6" rx="1"/>
+            <rect x="9" y="1" width="6" height="6" rx="1"/>
+            <rect x="1" y="9" width="6" height="6" rx="1"/>
+            <rect x="9" y="9" width="6" height="6" rx="1"/>
+          </svg>
+          Group
+        </button>
         <div class="connection-indicator" :class="{ connected: extensionConnected }">
           <span class="conn-dot" />
           {{ extensionConnected ? 'Extension connected' : 'Waiting for extension' }}
@@ -65,6 +80,7 @@ function formatBytes(bytes: number): string {
       <RequestTable
         :requests="filtered"
         :selected-id="selectedRequest?.id ?? null"
+        :grouped="grouped"
         @select="onSelect"
       />
 
@@ -163,6 +179,28 @@ function formatBytes(bytes: number): string {
 }
 
 .connection-indicator.connected { color: var(--green); }
+
+.group-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 4px 10px;
+  font-family: inherit;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.group-btn:hover { color: var(--text); border-color: var(--muted); }
+.group-btn.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(88, 166, 255, 0.08);
+}
 
 .clear-btn {
   background: none;

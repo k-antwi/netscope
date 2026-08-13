@@ -24,6 +24,7 @@ const ipInvestigation = useInvestigation()
 const serviceInvestigation = useServiceInvestigation()
 
 const search = ref('')
+const grouped = ref(false)
 
 const filtered = computed(() => {
   const q = search.value.toLowerCase()
@@ -76,6 +77,7 @@ const showServicePanel = computed(() => !!serviceInvestigation.selectedConnectio
       v-model:show-local="showLocal"
       v-model:auto-refresh="autoRefresh"
       v-model:refresh-interval="refreshInterval"
+      v-model:grouped="grouped"
       :is-loading="isLoading"
       @refresh="fetch"
     />
@@ -85,6 +87,7 @@ const showServicePanel = computed(() => !!serviceInvestigation.selectedConnectio
         :connections="filtered"
         :is-loading="isLoading"
         :selected-connection="selectedConnection"
+        :grouped="grouped"
         @select="onSelect"
       />
 
