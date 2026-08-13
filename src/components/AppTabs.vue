@@ -1,12 +1,17 @@
 <script setup lang="ts">
-export type TabKey = 'outbound' | 'inbound'
+export type TabKey = 'outbound' | 'inbound' | 'alerts'
 
-defineProps<{ activeTab: TabKey }>()
+defineProps<{
+  activeTab: TabKey
+  badges?: Partial<Record<TabKey, number>>
+}>()
+
 defineEmits<{ change: [tab: TabKey] }>()
 
 const tabs: { key: TabKey; label: string; icon: string }[] = [
   { key: 'outbound', label: 'Outbound', icon: '↗' },
   { key: 'inbound',  label: 'Inbound',  icon: '↙' },
+  { key: 'alerts',   label: 'Alerts',   icon: '⚑' },
 ]
 </script>
 
@@ -16,11 +21,12 @@ const tabs: { key: TabKey; label: string; icon: string }[] = [
       v-for="tab in tabs"
       :key="tab.key"
       class="tab"
-      :class="{ active: activeTab === tab.key }"
+      :class="{ active: activeTab === tab.key, 'has-badge': (badges?.[tab.key] ?? 0) > 0 }"
       @click="$emit('change', tab.key)"
     >
       <span class="tab-icon">{{ tab.icon }}</span>
       {{ tab.label }}
+      <span v-if="(badges?.[tab.key] ?? 0) > 0" class="badge">{{ badges![tab.key] }}</span>
     </button>
   </nav>
 </template>
@@ -58,4 +64,16 @@ const tabs: { key: TabKey; label: string; icon: string }[] = [
 }
 
 .tab-icon { font-size: 13px; }
+
+.badge {
+  background: var(--red);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 8px;
+  line-height: 1.4;
+  min-width: 16px;
+  text-align: center;
+}
 </style>

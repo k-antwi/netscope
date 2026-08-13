@@ -490,9 +490,157 @@ fn get_inbound(show_local: bool) -> Result<Vec<InboundConnection>, String> {
     Ok(parse_inbound(&stdout, show_local))
 }
 
+const DB_PORTS: &[(u16, &str)] = &[
+    (3306, "MySQL"), (5432, "PostgreSQL"), (6379, "Redis"),
+    (27017, "MongoDB"), (1433, "SQL Server"), (5984, "CouchDB"),
+    (9200, "Elasticsearch"), (9042, "Cassandra"),
+];
+
+const STANDARD_OUTBOUND: &[u16] = &[
+    21, 22, 25, 53, 80, 110, 143, 443, 465, 587, 993, 995,
+    8080, 8443, 123, 5228, 8888, 3000, 4000, 5000,
+];
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Issue {
+    pub severity: String,
+    pub category: String,
+    pub title: String,
+    pub detail: String,
+    pub process: String,
+    pub pid: u32,
+    pub port: Option<u16>,
+    pub remote_ip: Option<String>,
+}
+
+#[tauri::command]
+fn get_issues() -> Result<Vec<Issue>, String> {
+    let output = Command::new("lsof")
+        .args(["-i", "-n", "-P"])
+        .output()
+        .map_err(|e| e.to_string())?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    let inbound = parse_inbound(&stdout, false);
+    let outbound = parse_connections(&stdout, false);
+    let standard_ports: HashSet<u16> = STANDARD_OUTBOUND.iter().cloned().collect();
+
+    let mut issues: Vec<Issue> = Vec::new();
+
+    // --- Inbound: externally exposed services ---
+    for conn in &inbound {
+        if conn.state != "LISTEN" || !conn.is_all_interfaces { continue; }
+
+        if let Some((_, db_name)) = DB_PORTS.iter().find(|(p, _)| *p == conn.local_port) {
+            issues.push(Issue {
+                severity: "critical".to_string(),
+                category: "exposed-database".to_string(),
+                title: format!("{} database exposed to network", db_name),
+                detail: format!(
+                    "{} is listening on all interfaces (port {}). Anyone on the network may attempt to connect.",
+                    db_name, conn.local_port
+                ),
+                process: conn.process.clone(), pid: conn.pid,
+                port: Some(conn.local_port), remote_ip: None,
+            });
+            continue;
+        }
+
+        if conn.local_port == 23 {
+            issues.push(Issue {
+                severity: "critical".to_string(),
+                category: "plaintext-service".to_string(),
+                title: "Telnet service is exposed".to_string(),
+                detail: "Telnet transmits all traffic including passwords in plaintext. Disable this service immediately.".to_string(),
+                process: conn.process.clone(), pid: conn.pid,
+                port: Some(23), remote_ip: None,
+            });
+            continue;
+        }
+
+        if conn.local_port == 21 {
+            issues.push(Issue {
+                severity: "high".to_string(),
+                category: "plaintext-service".to_string(),
+                title: "FTP service is exposed".to_string(),
+                detail: "FTP sends credentials and data in plaintext. Use SFTP or FTPS instead.".to_string(),
+                process: conn.process.clone(), pid: conn.pid,
+                port: Some(21), remote_ip: None,
+            });
+            continue;
+        }
+
+        if conn.local_port == 80 {
+            issues.push(Issue {
+                severity: "warning".to_string(),
+                category: "unencrypted-exposure".to_string(),
+                title: "Unencrypted HTTP server exposed".to_string(),
+                detail: format!(
+                    "{} is serving HTTP on all interfaces. Traffic is unencrypted — consider redirecting to HTTPS.",
+                    conn.process
+                ),
+                process: conn.process.clone(), pid: conn.pid,
+                port: Some(80), remote_ip: None,
+            });
+            continue;
+        }
+
+        if !conn.is_encrypted {
+            issues.push(Issue {
+                severity: "warning".to_string(),
+                category: "unencrypted-exposure".to_string(),
+                title: format!("Port {} exposed without encryption", conn.local_port),
+                detail: format!(
+                    "{} is listening on all interfaces on port {} without TLS. Traffic to this service is unencrypted.",
+                    conn.process, conn.local_port
+                ),
+                process: conn.process.clone(), pid: conn.pid,
+                port: Some(conn.local_port), remote_ip: None,
+            });
+        }
+    }
+
+    // --- Outbound: unusual or plaintext traffic ---
+    let mut seen_outbound: HashSet<(String, u16)> = HashSet::new();
+    for conn in &outbound {
+        if conn.is_local { continue; }
+        if !seen_outbound.insert((conn.process.clone(), conn.remote_port)) { continue; }
+
+        if conn.remote_port == 80 {
+            issues.push(Issue {
+                severity: "info".to_string(),
+                category: "plaintext-outbound".to_string(),
+                title: format!("{} sending plaintext HTTP", conn.process),
+                detail: format!(
+                    "{} is connecting to external hosts over unencrypted HTTP (port 80). Traffic may be intercepted.",
+                    conn.process
+                ),
+                process: conn.process.clone(), pid: conn.pid,
+                port: Some(80), remote_ip: Some(conn.remote_ip.clone()),
+            });
+        } else if !standard_ports.contains(&conn.remote_port) {
+            issues.push(Issue {
+                severity: "info".to_string(),
+                category: "unusual-port".to_string(),
+                title: format!("{} using non-standard port {}", conn.process, conn.remote_port),
+                detail: format!(
+                    "{} connected to {}:{} — not a standard well-known service port.",
+                    conn.process, conn.remote_ip, conn.remote_port
+                ),
+                process: conn.process.clone(), pid: conn.pid,
+                port: Some(conn.remote_port), remote_ip: Some(conn.remote_ip.clone()),
+            });
+        }
+    }
+
+    let sev_order = |s: &str| match s { "critical" => 0, "high" => 1, "warning" => 2, _ => 3 };
+    issues.sort_by_key(|i| sev_order(&i.severity));
+    Ok(issues)
+}
+
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![get_connections, investigate_ip, get_inbound, investigate_service])
+        .invoke_handler(tauri::generate_handler![get_connections, investigate_ip, get_inbound, investigate_service, get_issues])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -57,6 +57,17 @@ export interface ServiceInvestigation {
   active_remotes: RemoteTrace[]
 }
 
+export interface Issue {
+  severity: 'critical' | 'high' | 'warning' | 'info'
+  category: string
+  title: string
+  detail: string
+  process: string
+  pid: number
+  port: number | null
+  remote_ip: string | null
+}
+
 export const PORT_LABELS: Record<number, string> = {
   21: 'FTP',
   22: 'SSH',

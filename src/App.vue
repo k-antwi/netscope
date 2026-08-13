@@ -1,11 +1,16 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import AppTabs from './components/AppTabs.vue'
 import OutboundView from './views/OutboundView.vue'
 import InboundView from './views/InboundView.vue'
+import AlertsView from './views/AlertsView.vue'
+import { useAlerts } from './composables/useAlerts'
 import type { TabKey } from './components/AppTabs.vue'
 
 const activeTab = ref<TabKey>('outbound')
+
+const { urgentCount } = useAlerts()
+const badges = computed(() => ({ alerts: urgentCount.value }))
 </script>
 
 <template>
@@ -15,12 +20,13 @@ const activeTab = ref<TabKey>('outbound')
         <span class="brand-icon">⬡</span>
         <span class="brand-name">NetScope</span>
       </div>
-      <AppTabs :active-tab="activeTab" @change="activeTab = $event" />
+      <AppTabs :active-tab="activeTab" :badges="badges" @change="activeTab = $event" />
     </header>
 
     <KeepAlive>
       <OutboundView v-if="activeTab === 'outbound'" />
       <InboundView v-else-if="activeTab === 'inbound'" />
+      <AlertsView v-else-if="activeTab === 'alerts'" />
     </KeepAlive>
   </div>
 </template>
@@ -72,7 +78,7 @@ body { background: var(--bg); color: var(--text); }
 }
 .brand-icon { font-size: 18px; }
 
-/* shared stat colour used by status bars */
+/* shared stat colours used by status bars */
 .https { color: var(--green) !important; }
 .warn  { color: var(--orange) !important; }
 </style>
