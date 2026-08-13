@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::process::Command;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -230,9 +231,130 @@ async fn investigate_ip(ip: String, port: u16) -> Result<IpInvestigation, String
     })
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct InboundConnection {
+    pub process: String,
+    pub pid: u32,
+    pub local_ip: String,
+    pub local_port: u16,
+    pub remote_ip: String,
+    pub remote_port: u16,
+    pub state: String,
+    pub is_encrypted: bool,
+    pub is_localhost_only: bool,
+    pub is_all_interfaces: bool,
+}
+
+fn parse_addr(addr: &str) -> Option<(String, u16)> {
+    if addr.starts_with('[') {
+        let b = addr.rfind("]:")?;
+        Some((addr[1..b].to_string(), addr[b + 2..].parse().ok()?))
+    } else {
+        let c = addr.rfind(':')?;
+        Some((addr[..c].to_string(), addr[c + 1..].parse().ok()?))
+    }
+}
+
+fn parse_inbound(output: &str, show_local: bool) -> Vec<InboundConnection> {
+    let mut results = Vec::new();
+    let mut listen_ports: HashSet<u16> = HashSet::new();
+    let encrypted_ports: HashSet<u16> = [443, 465, 587, 993, 8443].iter().cloned().collect();
+
+    // First pass: collect all LISTEN ports for inbound ESTABLISHED detection
+    for line in output.lines().skip(1) {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 10 { continue; }
+        let state = parts[9].trim_matches(|c| c == '(' || c == ')');
+        if state != "LISTEN" { continue; }
+        let name = parts[8];
+        if name.contains("->") { continue; }
+        if let Some((_, port)) = parse_addr(name) {
+            listen_ports.insert(port);
+        }
+    }
+
+    // Second pass: emit LISTEN entries + inbound ESTABLISHED
+    for line in output.lines().skip(1) {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 9 { continue; }
+
+        let name = parts[8];
+        let state = if parts.len() > 9 {
+            parts[9].trim_matches(|c| c == '(' || c == ')')
+        } else {
+            ""
+        };
+
+        let process = parts[0].to_string();
+        let pid: u32 = parts[1].parse().unwrap_or(0);
+
+        if state == "LISTEN" && !name.contains("->") {
+            if let Some((local_ip, local_port)) = parse_addr(name) {
+                let is_localhost_only =
+                    local_ip == "127.0.0.1" || local_ip == "::1" || local_ip == "localhost";
+                let is_all_interfaces = local_ip == "*";
+
+                if !show_local && is_localhost_only { continue; }
+
+                results.push(InboundConnection {
+                    process,
+                    pid,
+                    local_ip,
+                    local_port,
+                    remote_ip: String::new(),
+                    remote_port: 0,
+                    state: "LISTEN".to_string(),
+                    is_encrypted: encrypted_ports.contains(&local_port),
+                    is_localhost_only,
+                    is_all_interfaces,
+                });
+            }
+        } else if state == "ESTABLISHED" && name.contains("->") {
+            let arrow = match name.find("->") { Some(p) => p, None => continue };
+            let (Some((local_ip, local_port)), Some((remote_ip, remote_port))) = (
+                parse_addr(&name[..arrow]),
+                parse_addr(&name[arrow + 2..]),
+            ) else { continue };
+
+            // Only treat as inbound if local port is a known server port
+            if !listen_ports.contains(&local_port) { continue; }
+
+            let is_localhost_only =
+                remote_ip == "127.0.0.1" || remote_ip == "::1" || remote_ip.starts_with("fe80:");
+            if !show_local && is_localhost_only { continue; }
+
+            results.push(InboundConnection {
+                process,
+                pid,
+                local_ip,
+                local_port,
+                remote_ip,
+                remote_port,
+                state: "ESTABLISHED".to_string(),
+                is_encrypted: encrypted_ports.contains(&local_port),
+                is_localhost_only,
+                is_all_interfaces: false,
+            });
+        }
+    }
+
+    results
+}
+
+#[tauri::command]
+fn get_inbound(show_local: bool) -> Result<Vec<InboundConnection>, String> {
+    let output = Command::new("lsof")
+        .args(["-i", "-n", "-P"])
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(parse_inbound(&stdout, show_local))
+}
+
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![get_connections, investigate_ip])
+        .invoke_handler(tauri::generate_handler![get_connections, investigate_ip, get_inbound])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -9,6 +9,19 @@ export interface Connection {
   is_local: boolean
 }
 
+export interface InboundConnection {
+  process: string
+  pid: number
+  local_ip: string
+  local_port: number
+  remote_ip: string
+  remote_port: number
+  state: 'LISTEN' | 'ESTABLISHED'
+  is_encrypted: boolean
+  is_localhost_only: boolean
+  is_all_interfaces: boolean
+}
+
 export interface IpInvestigation {
   ip: string
   rdns: string
@@ -27,11 +40,17 @@ export const PORT_LABELS: Record<number, string> = {
   21: 'FTP',
   22: 'SSH',
   25: 'SMTP',
+  53: 'DNS',
   80: 'HTTP',
   443: 'HTTPS',
+  465: 'SMTPS',
   587: 'SMTP',
   993: 'IMAPS',
+  3306: 'MySQL',
+  5432: 'Postgres',
   5228: 'FCM',
+  6379: 'Redis',
   8080: 'HTTP-ALT',
   8443: 'HTTPS-ALT',
+  27017: 'MongoDB',
 }
