@@ -1,5 +1,5 @@
 <script setup lang="ts">
-export type TabKey = 'outbound' | 'inbound' | 'alerts'
+export type TabKey = 'outbound' | 'inbound' | 'alerts' | 'browser'
 
 defineProps<{
   activeTab: TabKey
@@ -12,6 +12,7 @@ const tabs: { key: TabKey; label: string; icon: string }[] = [
   { key: 'outbound', label: 'Outbound', icon: '↗' },
   { key: 'inbound',  label: 'Inbound',  icon: '↙' },
   { key: 'alerts',   label: 'Alerts',   icon: '⚑' },
+  { key: 'browser',  label: 'Browser',  icon: '⊕' },
 ]
 </script>
 

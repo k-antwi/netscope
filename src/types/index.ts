@@ -68,6 +68,29 @@ export interface Issue {
   remote_ip: string | null
 }
 
+// BrowserRequest uses camelCase (matches the extension's JSON + Rust serde rename_all)
+export interface BrowserHeader {
+  name: string
+  value: string
+}
+
+export interface BrowserRequest {
+  id: string
+  url: string
+  method: string
+  status: number
+  statusText: string
+  requestHeaders: BrowserHeader[]
+  responseHeaders: BrowserHeader[]
+  requestBody: string | null
+  timingMs: number
+  fromCache: boolean
+  initiator: string
+  tabUrl: string
+  timestamp: number
+  error: string | null
+}
+
 export const PORT_LABELS: Record<number, string> = {
   21: 'FTP',
   22: 'SSH',

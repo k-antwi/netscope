@@ -1,6 +1,8 @@
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::process::Command;
+use tauri::Emitter;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Connection {
@@ -638,8 +640,70 @@ fn get_issues() -> Result<Vec<Issue>, String> {
     Ok(issues)
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserHeader {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserRequest {
+    pub id: String,
+    pub url: String,
+    pub method: String,
+    pub status: u16,
+    pub status_text: String,
+    pub request_headers: Vec<BrowserHeader>,
+    pub response_headers: Vec<BrowserHeader>,
+    pub request_body: Option<String>,
+    pub timing_ms: f64,
+    pub from_cache: bool,
+    pub initiator: String,
+    pub tab_url: String,
+    pub timestamp: f64,
+    pub error: Option<String>,
+}
+
+async fn start_ws_server(app_handle: tauri::AppHandle) {
+    let listener = match tokio::net::TcpListener::bind("127.0.0.1:9922").await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("[NetScope] WS server failed to bind :9922 — {}", e);
+            return;
+        }
+    };
+    eprintln!("[NetScope] Extension bridge listening on ws://127.0.0.1:9922");
+
+    while let Ok((stream, _)) = listener.accept().await {
+        let handle = app_handle.clone();
+        tokio::spawn(async move {
+            let ws = match tokio_tungstenite::accept_async(stream).await {
+                Ok(ws) => ws,
+                Err(_) => return,
+            };
+            let _ = handle.emit("extension-connected", ());
+            let (_, mut read) = ws.split();
+            while let Some(Ok(msg)) = read.next().await {
+                if let tokio_tungstenite::tungstenite::Message::Text(text) = msg {
+                    if let Ok(req) = serde_json::from_str::<BrowserRequest>(&text) {
+                        let _ = handle.emit("browser-request", &req);
+                    }
+                }
+            }
+            let _ = handle.emit("extension-disconnected", ());
+        });
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
+        .setup(|app| {
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(start_ws_server(handle));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![get_connections, investigate_ip, get_inbound, investigate_service, get_issues])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

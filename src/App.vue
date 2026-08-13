@@ -4,6 +4,7 @@ import AppTabs from './components/AppTabs.vue'
 import OutboundView from './views/OutboundView.vue'
 import InboundView from './views/InboundView.vue'
 import AlertsView from './views/AlertsView.vue'
+import BrowserView from './views/BrowserView.vue'
 import { useAlerts } from './composables/useAlerts'
 import type { TabKey } from './components/AppTabs.vue'
 
@@ -27,6 +28,7 @@ const badges = computed(() => ({ alerts: urgentCount.value }))
       <OutboundView v-if="activeTab === 'outbound'" />
       <InboundView v-else-if="activeTab === 'inbound'" />
       <AlertsView v-else-if="activeTab === 'alerts'" />
+      <BrowserView v-else-if="activeTab === 'browser'" />
     </KeepAlive>
   </div>
 </template>
@@ -78,7 +80,6 @@ body { background: var(--bg); color: var(--text); }
 }
 .brand-icon { font-size: 18px; }
 
-/* shared stat colours used by status bars */
 .https { color: var(--green) !important; }
 .warn  { color: var(--orange) !important; }
 </style>
