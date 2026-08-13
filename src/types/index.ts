@@ -36,6 +36,14 @@ export interface IpInvestigation {
   suspicious_reasons: string[]
 }
 
+export interface RemoteTrace {
+  ip: string
+  rdns: string
+  org: string
+  country: string
+  city: string
+}
+
 export interface ServiceInvestigation {
   pid: number
   process_path: string
@@ -46,6 +54,7 @@ export interface ServiceInvestigation {
   active_connections: number
   is_encrypted: boolean
   warnings: string[]
+  active_remotes: RemoteTrace[]
 }
 
 export const PORT_LABELS: Record<number, string> = {

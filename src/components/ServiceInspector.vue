@@ -31,10 +31,12 @@ function portLabel(port: number): string {
     <div v-if="isLoading" class="loading">
       <span class="spin-lg">↺</span>
       <span>Inspecting service…</span>
+      <span class="hint">tracing active connections</span>
     </div>
 
     <div v-else-if="investigation" class="results">
-      <!-- Warnings banner -->
+
+      <!-- Verdict -->
       <div v-if="investigation.warnings.length" class="verdict suspicious">
         <span class="verdict-icon">⚠</span>
         <span>{{ investigation.warnings.length }} warning{{ investigation.warnings.length > 1 ? 's' : '' }}</span>
@@ -64,12 +66,6 @@ function portLabel(port: number): string {
         <div class="field">
           <span class="label">PID</span>
           <span class="value mono">{{ investigation.pid }}</span>
-        </div>
-        <div class="field">
-          <span class="label">Active connections</span>
-          <span class="value" :class="{ accent: investigation.active_connections > 0 }">
-            {{ investigation.active_connections }}
-          </span>
         </div>
       </div>
 
@@ -101,6 +97,43 @@ function portLabel(port: number): string {
           </span>
         </div>
       </div>
+
+      <!-- Active connections -->
+      <template v-if="investigation.active_connections > 0">
+        <div class="divider" />
+
+        <div class="section-title">
+          Active Connections
+          <span class="count-badge">{{ investigation.active_connections }}</span>
+        </div>
+
+        <div
+          v-for="trace in investigation.active_remotes"
+          :key="trace.ip"
+          class="trace-card"
+        >
+          <div class="trace-ip mono">{{ trace.ip }}</div>
+          <div class="trace-row">
+            <span class="label">Hostname</span>
+            <span class="value mono small">{{ trace.rdns || '—' }}</span>
+          </div>
+          <div class="trace-row">
+            <span class="label">Organisation</span>
+            <span class="value small">{{ trace.org || '—' }}</span>
+          </div>
+          <div class="trace-row" v-if="trace.city || trace.country">
+            <span class="label">Location</span>
+            <span class="value small">
+              {{ [trace.city, trace.country].filter(Boolean).join(', ') }}
+            </span>
+          </div>
+        </div>
+      </template>
+
+      <div v-else class="no-connections">
+        No active connections on this port
+      </div>
+
     </div>
   </aside>
 </template>
@@ -164,6 +197,7 @@ function portLabel(port: number): string {
 
 @keyframes spin { to { transform: rotate(360deg); } }
 .spin-lg { display: inline-block; animation: spin 1s linear infinite; font-size: 22px; }
+.hint { font-size: 11px; font-family: 'SF Mono', 'Menlo', monospace; }
 
 .results { padding: 12px; display: flex; flex-direction: column; gap: 12px; }
 
@@ -205,11 +239,25 @@ function portLabel(port: number): string {
 .divider { height: 1px; background: var(--border); }
 
 .section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--muted);
   margin-bottom: -4px;
+}
+
+.count-badge {
+  background: var(--accent);
+  color: #000;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 10px;
+  letter-spacing: 0;
+  text-transform: none;
 }
 
 .field-grid { display: flex; flex-direction: column; gap: 8px; }
@@ -228,7 +276,37 @@ function portLabel(port: number): string {
 .value.warn { color: var(--orange); }
 .value.green { color: var(--green); }
 .value.muted { color: var(--muted); }
-.value.accent { color: var(--accent); }
 
 .mono { font-family: 'SF Mono', 'Menlo', monospace; }
+
+/* Trace cards */
+.trace-card {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.trace-ip {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  margin-bottom: 2px;
+}
+
+.trace-row {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.no-connections {
+  font-size: 12px;
+  color: var(--muted);
+  text-align: center;
+  padding: 8px 0;
+}
 </style>

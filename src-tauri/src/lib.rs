@@ -341,6 +341,15 @@ fn parse_inbound(output: &str, show_local: bool) -> Vec<InboundConnection> {
     results
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RemoteTrace {
+    pub ip: String,
+    pub rdns: String,
+    pub org: String,
+    pub country: String,
+    pub city: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ServiceInvestigation {
     pub pid: u32,
@@ -352,6 +361,7 @@ pub struct ServiceInvestigation {
     pub active_connections: u32,
     pub is_encrypted: bool,
     pub warnings: Vec<String>,
+    pub active_remotes: Vec<RemoteTrace>,
 }
 
 const ENCRYPTED_PORTS: &[u16] = &[443, 465, 587, 993, 8443];
@@ -371,19 +381,66 @@ fn known_service(port: u16) -> String {
 
 #[tauri::command]
 async fn investigate_service(pid: u32, local_port: u16, local_ip: String) -> Result<ServiceInvestigation, String> {
-    let (process_path, conn_count_raw) = tokio::join!(
+    // Phase 1: process path + full lsof for this port (parallel)
+    let (process_path, lsof_raw) = tokio::join!(
         shell_async(format!("ps -p {} -o args= 2>/dev/null | head -1", pid)),
-        shell_async(format!(
-            "lsof -i :{} -n -P 2>/dev/null | grep -c ESTABLISHED || echo 0",
-            local_port
-        )),
+        shell_async(format!("lsof -i :{} -n -P 2>/dev/null", local_port)),
     );
 
-    let active_connections: u32 = conn_count_raw.trim().parse().unwrap_or(0);
+    // Parse unique remote IPs from ESTABLISHED connections (cap at 10)
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut remote_ips: Vec<String> = Vec::new();
+    for line in lsof_raw.lines() {
+        if !line.contains("ESTABLISHED") { continue; }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 9 { continue; }
+        let name = parts[8];
+        if let Some(arrow) = name.find("->") {
+            if let Some((ip, _)) = parse_addr(&name[arrow + 2..]) {
+                if seen.insert(ip.clone()) && remote_ips.len() < 10 {
+                    remote_ips.push(ip);
+                }
+            }
+        }
+    }
+
+    let active_connections = remote_ips.len() as u32;
+
+    // Phase 2: trace each remote IP concurrently
+    let trace_handles: Vec<_> = remote_ips
+        .into_iter()
+        .map(|ip| {
+            tokio::task::spawn_blocking(move || {
+                let rdns = shell(&format!("dig -x {} +short 2>/dev/null | head -1", ip));
+                let ipinfo_raw = shell(&format!(
+                    "curl -s --max-time 4 https://ipinfo.io/{}/json 2>/dev/null",
+                    ip
+                ));
+                let info: serde_json::Value =
+                    serde_json::from_str(&ipinfo_raw).unwrap_or_default();
+                RemoteTrace {
+                    ip,
+                    rdns,
+                    org: info["org"].as_str().unwrap_or("").to_string(),
+                    country: info["country"].as_str().unwrap_or("").to_string(),
+                    city: info["city"].as_str().unwrap_or("").to_string(),
+                }
+            })
+        })
+        .collect();
+
+    let mut active_remotes: Vec<RemoteTrace> = Vec::new();
+    for handle in trace_handles {
+        if let Ok(trace) = handle.await {
+            active_remotes.push(trace);
+        }
+    }
+
     let is_encrypted = ENCRYPTED_PORTS.contains(&local_port);
     let service_name = known_service(local_port);
+    let is_all_interfaces = local_ip == "*" || local_ip == "0.0.0.0" || local_ip == "::";
 
-    let exposure = if local_ip == "*" || local_ip == "0.0.0.0" || local_ip == "::" {
+    let exposure = if is_all_interfaces {
         "Internet-facing (all interfaces)".to_string()
     } else if local_ip == "127.0.0.1" || local_ip == "::1" {
         "Localhost only — not externally reachable".to_string()
@@ -392,8 +449,6 @@ async fn investigate_service(pid: u32, local_port: u16, local_ip: String) -> Res
     };
 
     let mut warnings: Vec<String> = Vec::new();
-
-    let is_all_interfaces = local_ip == "*" || local_ip == "0.0.0.0" || local_ip == "::";
     if is_all_interfaces && !is_encrypted {
         warnings.push(format!(
             "Port {} is exposed on all interfaces without TLS encryption",
@@ -420,6 +475,7 @@ async fn investigate_service(pid: u32, local_port: u16, local_ip: String) -> Res
         active_connections,
         is_encrypted,
         warnings,
+        active_remotes,
     })
 }
 
