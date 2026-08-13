@@ -1,0 +1,13 @@
+# environment
+.env
+
+# frontend
+node_modules/
+dist/
+
+# rust build artifacts
+src-tauri/target/
+
+# tauri-generated files (rebuilt on `cargo tauri dev/build`)
+src-tauri/gen/
+
