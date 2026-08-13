@@ -6,11 +6,11 @@ import { PORT_LABELS } from '../types'
 const props = defineProps<{
   connections: InboundConnection[]
   isLoading: boolean
-  selectedIp: string | null
+  selectedConnection: InboundConnection | null
 }>()
 
 const emit = defineEmits<{
-  investigate: [ip: string, port: number]
+  select: [connection: InboundConnection]
 }>()
 
 type SortKey = 'process' | 'local_port' | 'local_ip' | 'state'
@@ -45,9 +45,17 @@ function sortIcon(key: SortKey): string {
   return sortKey.value === key ? (sortAsc.value ? ' ↑' : ' ↓') : ''
 }
 
+function isSelected(c: InboundConnection): boolean {
+  const s = props.selectedConnection
+  if (!s) return false
+  if (c.state === 'LISTEN') {
+    return s.state === 'LISTEN' && s.pid === c.pid && s.local_port === c.local_port
+  }
+  return s.state === 'ESTABLISHED' && s.remote_ip === c.remote_ip && s.remote_port === c.remote_port
+}
+
 function rowClass(c: InboundConnection): string {
-  const isSelected = c.remote_ip && c.remote_ip === props.selectedIp
-  if (isSelected) return 'row selected'
+  if (isSelected(c)) return 'row selected'
   if (c.state === 'ESTABLISHED') return 'row established'
   if (c.is_localhost_only) return 'row local'
   if (c.is_all_interfaces) return 'row exposed'
@@ -83,7 +91,7 @@ function rowClass(c: InboundConnection): string {
           v-for="(c, i) in sorted"
           :key="i"
           :class="rowClass(c)"
-          @click="c.remote_ip && emit('investigate', c.remote_ip, c.remote_port)"
+          @click="emit('select', c)"
         >
           <td class="process" :title="c.process">{{ c.process }}</td>
           <td class="pid mono">{{ c.pid }}</td>
@@ -110,10 +118,9 @@ function rowClass(c: InboundConnection): string {
           </td>
           <td class="action">
             <button
-              v-if="c.remote_ip && !c.is_localhost_only"
-              class="investigate-btn"
-              @click.stop="emit('investigate', c.remote_ip, c.remote_port)"
-              title="Investigate remote IP"
+              class="inspect-btn"
+              @click.stop="emit('select', c)"
+              :title="c.state === 'LISTEN' ? 'Inspect service' : 'Investigate remote IP'"
             >
               ⌖
             </button>
@@ -142,7 +149,6 @@ function rowClass(c: InboundConnection): string {
 .spin-lg { display: inline-block; animation: spin 1s linear infinite; font-size: 24px; }
 
 table { width: 100%; border-collapse: collapse; font-size: 12px; }
-
 thead { position: sticky; top: 0; z-index: 1; background: var(--surface); }
 
 th {
@@ -165,17 +171,18 @@ td {
   white-space: nowrap;
 }
 
-.row { cursor: default; transition: background 0.1s; }
+.row { cursor: pointer; transition: background 0.1s; }
+.row:hover { background: var(--surface-2); }
 .row.exposed { background: rgba(210, 153, 34, 0.08); }
 .row.exposed:hover { background: rgba(210, 153, 34, 0.14); }
-.row.established { background: rgba(88, 166, 255, 0.08); cursor: pointer; }
+.row.established { background: rgba(88, 166, 255, 0.08); }
 .row.established:hover { background: rgba(88, 166, 255, 0.14); }
 .row.local { opacity: 0.45; }
-.row.selected { background: rgba(88, 166, 255, 0.18); outline: 1px solid var(--accent); }
+.row.local:hover { opacity: 0.7; background: var(--surface-2); }
+.row.selected { background: rgba(88, 166, 255, 0.18) !important; outline: 1px solid var(--accent); }
 
 .process { max-width: 120px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; }
 .pid { color: var(--muted); }
-.ip { }
 .mono { font-family: 'SF Mono', 'Menlo', monospace; }
 .remote { font-family: 'SF Mono', 'Menlo', monospace; font-size: 11px; color: var(--muted); }
 .muted { color: var(--muted); }
@@ -219,17 +226,11 @@ td {
   letter-spacing: 0.05em;
   font-weight: 600;
 }
-.state-badge.listen {
-  background: rgba(210, 153, 34, 0.12);
-  color: var(--orange);
-}
-.state-badge.established {
-  background: rgba(88, 166, 255, 0.12);
-  color: var(--accent);
-}
+.state-badge.listen { background: rgba(210, 153, 34, 0.12); color: var(--orange); }
+.state-badge.established { background: rgba(88, 166, 255, 0.12); color: var(--accent); }
 
 .action { width: 36px; text-align: center; }
-.investigate-btn {
+.inspect-btn {
   background: none;
   border: none;
   color: var(--muted);
@@ -239,5 +240,5 @@ td {
   border-radius: 4px;
   line-height: 1;
 }
-.investigate-btn:hover { color: var(--accent); background: var(--surface-2); }
+.inspect-btn:hover { color: var(--accent); background: var(--surface-2); }
 </style>

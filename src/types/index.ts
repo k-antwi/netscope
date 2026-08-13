@@ -36,6 +36,18 @@ export interface IpInvestigation {
   suspicious_reasons: string[]
 }
 
+export interface ServiceInvestigation {
+  pid: number
+  process_path: string
+  local_port: number
+  local_ip: string
+  service_name: string
+  exposure: string
+  active_connections: number
+  is_encrypted: boolean
+  warnings: string[]
+}
+
 export const PORT_LABELS: Record<number, string> = {
   21: 'FTP',
   22: 'SSH',

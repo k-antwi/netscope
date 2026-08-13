@@ -2,10 +2,13 @@
 import { computed, ref } from 'vue'
 import { useInbound } from '../composables/useInbound'
 import { useInvestigation } from '../composables/useInvestigation'
+import { useServiceInvestigation } from '../composables/useServiceInvestigation'
 import InboundTable from '../components/InboundTable.vue'
 import IpInspector from '../components/IpInspector.vue'
+import ServiceInspector from '../components/ServiceInspector.vue'
 import ViewToolbar from '../components/ViewToolbar.vue'
 import ViewStatusBar from '../components/ViewStatusBar.vue'
+import type { InboundConnection } from '../types'
 
 const {
   connections,
@@ -17,8 +20,8 @@ const {
   fetch,
 } = useInbound()
 
-const { selectedIp, selectedPort, investigation, isInvestigating, investigate, close } =
-  useInvestigation()
+const ipInvestigation = useInvestigation()
+const serviceInvestigation = useServiceInvestigation()
 
 const search = ref('')
 
@@ -37,6 +40,33 @@ const filtered = computed(() => {
 const exposedCount = computed(
   () => filtered.value.filter(c => c.state === 'LISTEN' && c.is_all_interfaces).length
 )
+
+// Which connection is currently selected (for row highlighting)
+const selectedConnection = computed<InboundConnection | null>(
+  () => serviceInvestigation.selectedConnection.value ?? (
+    ipInvestigation.selectedIp.value
+      ? (filtered.value.find(c => c.remote_ip === ipInvestigation.selectedIp.value) ?? null)
+      : null
+  )
+)
+
+function onSelect(c: InboundConnection) {
+  if (c.state === 'LISTEN') {
+    ipInvestigation.close()
+    serviceInvestigation.investigate(c)
+  } else if (c.remote_ip) {
+    serviceInvestigation.close()
+    ipInvestigation.investigate(c.remote_ip, c.remote_port)
+  }
+}
+
+function closeAll() {
+  ipInvestigation.close()
+  serviceInvestigation.close()
+}
+
+const showIpPanel = computed(() => !!ipInvestigation.selectedIp.value)
+const showServicePanel = computed(() => !!serviceInvestigation.selectedConnection.value)
 </script>
 
 <template>
@@ -54,17 +84,26 @@ const exposedCount = computed(
       <InboundTable
         :connections="filtered"
         :is-loading="isLoading"
-        :selected-ip="selectedIp"
-        @investigate="investigate"
+        :selected-connection="selectedConnection"
+        @select="onSelect"
       />
+
       <Transition name="panel">
         <IpInspector
-          v-if="selectedIp"
-          :ip="selectedIp"
-          :port="selectedPort"
-          :investigation="investigation"
-          :is-loading="isInvestigating"
-          @close="close"
+          v-if="showIpPanel"
+          :ip="ipInvestigation.selectedIp.value!"
+          :port="ipInvestigation.selectedPort.value"
+          :investigation="ipInvestigation.investigation.value"
+          :is-loading="ipInvestigation.isInvestigating.value"
+          @close="closeAll"
+        />
+        <ServiceInspector
+          v-else-if="showServicePanel"
+          :local-ip="serviceInvestigation.selectedConnection.value!.local_ip"
+          :local-port="serviceInvestigation.selectedConnection.value!.local_port"
+          :investigation="serviceInvestigation.investigation.value"
+          :is-loading="serviceInvestigation.isInvestigating.value"
+          @close="closeAll"
         />
       </Transition>
     </div>

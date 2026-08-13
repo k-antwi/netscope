@@ -341,6 +341,88 @@ fn parse_inbound(output: &str, show_local: bool) -> Vec<InboundConnection> {
     results
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ServiceInvestigation {
+    pub pid: u32,
+    pub process_path: String,
+    pub local_port: u16,
+    pub local_ip: String,
+    pub service_name: String,
+    pub exposure: String,
+    pub active_connections: u32,
+    pub is_encrypted: bool,
+    pub warnings: Vec<String>,
+}
+
+const ENCRYPTED_PORTS: &[u16] = &[443, 465, 587, 993, 8443];
+const WELL_KNOWN_SERVICES: &[(u16, &str)] = &[
+    (21, "FTP"), (22, "SSH"), (23, "Telnet"), (25, "SMTP"), (53, "DNS"),
+    (80, "HTTP"), (110, "POP3"), (143, "IMAP"), (443, "HTTPS"),
+    (3306, "MySQL"), (5432, "PostgreSQL"), (6379, "Redis"),
+    (8080, "HTTP-ALT"), (8443, "HTTPS-ALT"), (27017, "MongoDB"),
+];
+
+fn known_service(port: u16) -> String {
+    WELL_KNOWN_SERVICES.iter()
+        .find(|(p, _)| *p == port)
+        .map(|(_, name)| name.to_string())
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+async fn investigate_service(pid: u32, local_port: u16, local_ip: String) -> Result<ServiceInvestigation, String> {
+    let (process_path, conn_count_raw) = tokio::join!(
+        shell_async(format!("ps -p {} -o args= 2>/dev/null | head -1", pid)),
+        shell_async(format!(
+            "lsof -i :{} -n -P 2>/dev/null | grep -c ESTABLISHED || echo 0",
+            local_port
+        )),
+    );
+
+    let active_connections: u32 = conn_count_raw.trim().parse().unwrap_or(0);
+    let is_encrypted = ENCRYPTED_PORTS.contains(&local_port);
+    let service_name = known_service(local_port);
+
+    let exposure = if local_ip == "*" || local_ip == "0.0.0.0" || local_ip == "::" {
+        "Internet-facing (all interfaces)".to_string()
+    } else if local_ip == "127.0.0.1" || local_ip == "::1" {
+        "Localhost only — not externally reachable".to_string()
+    } else {
+        format!("Bound to {}", local_ip)
+    };
+
+    let mut warnings: Vec<String> = Vec::new();
+
+    let is_all_interfaces = local_ip == "*" || local_ip == "0.0.0.0" || local_ip == "::";
+    if is_all_interfaces && !is_encrypted {
+        warnings.push(format!(
+            "Port {} is exposed on all interfaces without TLS encryption",
+            local_port
+        ));
+    }
+    if local_port == 23 {
+        warnings.push("Telnet is unencrypted and should not be exposed".to_string());
+    }
+    if local_port == 21 {
+        warnings.push("FTP transmits credentials in plaintext".to_string());
+    }
+    if local_port == 80 && is_all_interfaces {
+        warnings.push("HTTP is unencrypted — consider redirecting to HTTPS".to_string());
+    }
+
+    Ok(ServiceInvestigation {
+        pid,
+        process_path: process_path.trim().to_string(),
+        local_port,
+        local_ip,
+        service_name,
+        exposure,
+        active_connections,
+        is_encrypted,
+        warnings,
+    })
+}
+
 #[tauri::command]
 fn get_inbound(show_local: bool) -> Result<Vec<InboundConnection>, String> {
     let output = Command::new("lsof")
@@ -354,7 +436,7 @@ fn get_inbound(show_local: bool) -> Result<Vec<InboundConnection>, String> {
 
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![get_connections, investigate_ip, get_inbound])
+        .invoke_handler(tauri::generate_handler![get_connections, investigate_ip, get_inbound, investigate_service])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
