@@ -1,10 +1,21 @@
 <script setup lang="ts">
 import type { Issue } from '../types'
 
-defineProps<{
+const props = defineProps<{
   grouped: { severity: Issue['severity']; items: Issue[] }[]
   isLoading: boolean
+  selectedIssue?: Issue | null
 }>()
+
+const emit = defineEmits<{ select: [issue: Issue] }>()
+
+function issueKey(issue: Issue): string {
+  return `${issue.category}|${issue.process}|${issue.pid}|${issue.port}`
+}
+
+function isSelected(issue: Issue): boolean {
+  return !!props.selectedIssue && issueKey(props.selectedIssue) === issueKey(issue)
+}
 
 const SEV: Record<Issue['severity'], { label: string; icon: string; color: string; bg: string; border: string }> = {
   critical: {
@@ -74,11 +85,13 @@ const CATEGORY_LABEL: Record<string, string> = {
           v-for="(issue, i) in group.items"
           :key="i"
           class="issue-card"
+          :class="{ selected: isSelected(issue) }"
           :style="{
             borderLeftColor: SEV[group.severity].color,
-            background: SEV[group.severity].bg,
-            borderColor: SEV[group.severity].border,
+            background: isSelected(issue) ? undefined : SEV[group.severity].bg,
+            borderColor: isSelected(issue) ? SEV[group.severity].color : SEV[group.severity].border,
           }"
+          @click="emit('select', issue)"
         >
           <div class="issue-title">{{ issue.title }}</div>
           <div class="issue-detail">{{ issue.detail }}</div>
@@ -165,6 +178,14 @@ const CATEGORY_LABEL: Record<string, string> = {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  cursor: pointer;
+  transition: filter 0.1s;
+}
+.issue-card:hover { filter: brightness(1.06); }
+.issue-card.selected {
+  background: var(--surface-2) !important;
+  box-shadow: 0 0 0 1px currentColor;
+  outline: none;
 }
 
 .issue-title {

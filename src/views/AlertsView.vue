@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { ref, computed } from 'vue'
 import { useAlerts } from '../composables/useAlerts'
 import AlertsList from '../components/AlertsList.vue'
+import AlertDetail from '../components/AlertDetail.vue'
+import type { Issue } from '../types'
 
 const { issues, isLoading, lastRefreshText, urgentCount, grouped, fetch } = useAlerts()
 
@@ -9,6 +11,16 @@ const criticalCount = computed(() => issues.value.filter(i => i.severity === 'cr
 const highCount = computed(() => issues.value.filter(i => i.severity === 'high').length)
 const warningCount = computed(() => issues.value.filter(i => i.severity === 'warning').length)
 const infoCount = computed(() => issues.value.filter(i => i.severity === 'info').length)
+
+const selectedIssue = ref<Issue | null>(null)
+
+function onSelect(issue: Issue) {
+  selectedIssue.value = selectedIssue.value === issue ? null : issue
+}
+
+function closeDetail() {
+  selectedIssue.value = null
+}
 </script>
 
 <template>
@@ -44,7 +56,22 @@ const infoCount = computed(() => issues.value.filter(i => i.severity === 'info')
       </div>
     </div>
 
-    <AlertsList :grouped="grouped" :is-loading="isLoading" />
+    <div class="content">
+      <AlertsList
+        :grouped="grouped"
+        :is-loading="isLoading"
+        :selected-issue="selectedIssue"
+        @select="onSelect"
+      />
+
+      <Transition name="panel">
+        <AlertDetail
+          v-if="selectedIssue"
+          :issue="selectedIssue"
+          @close="closeDetail"
+        />
+      </Transition>
+    </div>
 
     <div class="status-bar">
       <span>{{ issues.length }} issue{{ issues.length !== 1 ? 's' : '' }} found</span>
@@ -129,6 +156,8 @@ const infoCount = computed(() => issues.value.filter(i => i.severity === 'info')
 @keyframes spin { to { transform: rotate(360deg); } }
 .refresh-btn.spinning { animation: spin 0.8s linear infinite; }
 
+.content { display: flex; flex: 1; overflow: hidden; }
+
 .status-bar {
   display: flex;
   justify-content: space-between;
@@ -142,4 +171,9 @@ const infoCount = computed(() => issues.value.filter(i => i.severity === 'info')
 }
 
 .urgent-label { color: var(--orange); font-weight: 600; }
+
+.panel-enter-active, .panel-leave-active {
+  transition: transform 0.2s ease, opacity 0.2s ease;
+}
+.panel-enter-from, .panel-leave-to { transform: translateX(100%); opacity: 0; }
 </style>
