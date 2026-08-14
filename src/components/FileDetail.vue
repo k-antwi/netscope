@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import type { FileMatch, FileDetails, FileProcess, MalwareCheckResult } from '../types'
+import type { FileMatch, FileDetails, MalwareCheckResult } from '../types'
 
 const props = defineProps<{
   file: FileMatch

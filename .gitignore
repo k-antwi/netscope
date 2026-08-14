@@ -11,3 +11,4 @@ src-tauri/target/
 # tauri-generated files (rebuilt on `cargo tauri dev/build`)
 src-tauri/gen/
 
+*.DS_Store
