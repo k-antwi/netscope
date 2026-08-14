@@ -266,6 +266,23 @@ function accessColor(access: string): string {
             class="malware-link"
           >View on VirusTotal ↗</a>
 
+          <div v-if="malwareResult.malware_bazaar" class="mb-row">
+            <span class="malware-msg">MalwareBazaar:</span>
+            <span
+              class="access-badge"
+              :class="malwareResult.malware_bazaar.found ? 'orange' : 'green'"
+            >{{ malwareResult.malware_bazaar.found
+              ? (malwareResult.malware_bazaar.signature || 'Known malware sample')
+              : 'Not found' }}</span>
+            <a
+              v-if="malwareResult.malware_bazaar.found"
+              :href="`https://bazaar.abuse.ch/sample/${malwareResult.sha256}/`"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="malware-link"
+            >View ↗</a>
+          </div>
+
           <button v-if="malwareResult.status !== 'no_api_key'" class="malware-retry" @click="checkMalware">Re-scan</button>
         </div>
       </div>
@@ -536,6 +553,12 @@ function accessColor(access: string): string {
   font-size: 11px;
   color: var(--muted);
   line-height: 1.5;
+}
+
+.mb-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .malware-link {

@@ -80,6 +80,14 @@ export interface FileDetails {
   processes: FileProcess[]
 }
 
+export interface MalwareBazaarInfo {
+  found: boolean
+  signature: string | null
+  file_type: string | null
+  tags: string[]
+  first_seen: string | null
+}
+
 export interface MalwareCheckResult {
   status: 'clean' | 'malicious' | 'suspicious' | 'unknown' | 'no_api_key' | 'error'
   sha256: string
@@ -90,6 +98,7 @@ export interface MalwareCheckResult {
   total_engines: number
   permalink: string | null
   message: string | null
+  malware_bazaar: MalwareBazaarInfo | null
 }
 
 export interface ScanSummary {
@@ -119,6 +128,22 @@ export interface ServiceInvestigation {
   is_encrypted: boolean
   warnings: string[]
   active_remotes: RemoteTrace[]
+}
+
+export interface CveEntry {
+  id: string
+  description: string
+  severity: string | null
+  score: number | null
+  published: string | null
+  url: string
+}
+
+export interface CveCheckResult {
+  query: string
+  total_results: number
+  cves: CveEntry[]
+  message: string | null
 }
 
 export interface Issue {
