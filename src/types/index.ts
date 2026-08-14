@@ -80,6 +80,18 @@ export interface FileDetails {
   processes: FileProcess[]
 }
 
+export interface MalwareCheckResult {
+  status: 'clean' | 'malicious' | 'suspicious' | 'unknown' | 'no_api_key' | 'error'
+  sha256: string
+  malicious: number
+  suspicious: number
+  harmless: number
+  undetected: number
+  total_engines: number
+  permalink: string | null
+  message: string | null
+}
+
 export interface ScanSummary {
   matches: number
   scannedDirs: number

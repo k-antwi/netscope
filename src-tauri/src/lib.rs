@@ -1,6 +1,8 @@
 mod file_scan;
+mod malware_check;
 
 use file_scan::{cancel_file_scan, delete_files, get_file_details, reveal_in_finder, scan_files, ScanState};
+use malware_check::check_malware;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -701,6 +703,8 @@ async fn start_ws_server(app_handle: tauri::AppHandle) {
 }
 
 pub fn run() {
+    dotenvy::dotenv().ok();
+
     tauri::Builder::default()
         .manage(ScanState::default())
         .plugin(tauri_plugin_notification::init())
@@ -709,7 +713,7 @@ pub fn run() {
             tauri::async_runtime::spawn(start_ws_server(handle));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_connections, investigate_ip, get_inbound, investigate_service, get_issues, scan_files, cancel_file_scan, delete_files, get_file_details, reveal_in_finder])
+        .invoke_handler(tauri::generate_handler![get_connections, investigate_ip, get_inbound, investigate_service, get_issues, scan_files, cancel_file_scan, delete_files, get_file_details, reveal_in_finder, check_malware])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

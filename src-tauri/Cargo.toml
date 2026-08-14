@@ -18,3 +18,5 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
 tauri-plugin-notification = "2"
+sha2 = "0.10"
+dotenvy = "0.15"

@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import type { FileMatch, FileDetails, FileProcess } from '../types'
+import type { FileMatch, FileDetails, FileProcess, MalwareCheckResult } from '../types'
 
 const props = defineProps<{
   file: FileMatch
@@ -13,6 +13,45 @@ defineEmits<{ close: [] }>()
 
 const copiedPath = ref(false)
 let copyTimer: ReturnType<typeof setTimeout> | null = null
+
+const isCheckingMalware = ref(false)
+const malwareResult = ref<MalwareCheckResult | null>(null)
+const malwareError = ref<string | null>(null)
+
+watch(() => props.file.path, () => {
+  isCheckingMalware.value = false
+  malwareResult.value = null
+  malwareError.value = null
+})
+
+async function checkMalware() {
+  isCheckingMalware.value = true
+  malwareError.value = null
+  malwareResult.value = null
+  try {
+    malwareResult.value = await invoke<MalwareCheckResult>('check_malware', { path: props.file.path })
+  } catch (e) {
+    malwareError.value = String(e)
+  } finally {
+    isCheckingMalware.value = false
+  }
+}
+
+const MALWARE_LABELS: Record<MalwareCheckResult['status'], string> = {
+  clean: 'No threats detected',
+  malicious: 'Malicious',
+  suspicious: 'Suspicious',
+  unknown: 'Not in database',
+  no_api_key: 'Malware check unavailable',
+  error: 'Check failed',
+}
+
+function malwareColor(status: MalwareCheckResult['status']): string {
+  if (status === 'malicious') return 'orange'
+  if (status === 'suspicious') return 'orange'
+  if (status === 'clean') return 'green'
+  return 'muted'
+}
 
 async function copyPath() {
   try {
@@ -177,6 +216,57 @@ function accessColor(access: string): string {
               :class="accessColor(proc.access)"
             >{{ proc.access }}</span>
           </div>
+        </div>
+      </div>
+
+      <div v-if="!file.is_dir" class="divider" />
+
+      <!-- Malware check -->
+      <div v-if="!file.is_dir" class="section">
+        <div class="section-label">Malware Check</div>
+
+        <button
+          v-if="!malwareResult && !malwareError"
+          class="malware-btn"
+          :disabled="isCheckingMalware"
+          @click="checkMalware"
+        >
+          <span v-if="isCheckingMalware" class="spin">↺</span>
+          <svg v-else width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M8 1.5l5.5 2v4c0 3.5-2.3 6-5.5 7-3.2-1-5.5-3.5-5.5-7v-4l5.5-2z"/>
+            <path d="M5.7 8l1.7 1.7 3-3.2"/>
+          </svg>
+          {{ isCheckingMalware ? 'Scanning…' : 'Scan for Malware' }}
+        </button>
+
+        <div v-if="malwareError" class="malware-result">
+          <span class="access-badge muted">Check failed</span>
+          <span class="malware-msg">{{ malwareError }}</span>
+          <button class="malware-retry" @click="checkMalware">Retry</button>
+        </div>
+
+        <div v-else-if="malwareResult" class="malware-result">
+          <span class="access-badge" :class="malwareColor(malwareResult.status)">
+            {{ MALWARE_LABELS[malwareResult.status] }}
+          </span>
+          <span
+            v-if="malwareResult.status === 'malicious' || malwareResult.status === 'suspicious'"
+            class="malware-msg"
+          >{{ malwareResult.malicious + malwareResult.suspicious }} / {{ malwareResult.total_engines }} engines flagged this file</span>
+          <span v-else-if="malwareResult.status === 'clean'" class="malware-msg">
+            0 / {{ malwareResult.total_engines }} engines flagged this file
+          </span>
+          <span v-else-if="malwareResult.message" class="malware-msg">{{ malwareResult.message }}</span>
+
+          <a
+            v-if="malwareResult.permalink"
+            :href="malwareResult.permalink"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="malware-link"
+          >View on VirusTotal ↗</a>
+
+          <button v-if="malwareResult.status !== 'no_api_key'" class="malware-retry" @click="checkMalware">Re-scan</button>
         </div>
       </div>
 
@@ -414,4 +504,55 @@ function accessColor(access: string): string {
 .access-badge.orange { color: var(--orange); border-color: rgba(210,153,34,0.3); background: rgba(210,153,34,0.1); }
 .access-badge.green  { color: var(--green);  border-color: rgba(63,185,80,0.3);  background: var(--green-dim); }
 .access-badge.blue   { color: var(--accent); border-color: rgba(88,166,255,0.25); background: rgba(88,166,255,0.07); }
+.access-badge.muted  { color: var(--muted); }
+
+/* Malware check */
+.malware-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  align-self: flex-start;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 7px 12px;
+  cursor: pointer;
+}
+.malware-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.malware-btn:disabled { cursor: default; opacity: 0.7; }
+
+.malware-result {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.malware-msg {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.malware-link {
+  font-size: 11px;
+  color: var(--accent);
+  text-decoration: none;
+}
+.malware-link:hover { text-decoration: underline; }
+
+.malware-retry {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+}
+.malware-retry:hover { color: var(--accent); }
 </style>
