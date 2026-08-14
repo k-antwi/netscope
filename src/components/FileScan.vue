@@ -3,7 +3,8 @@ import { ref, computed, watchEffect, onUnmounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import ScanDialog from './ScanDialog.vue'
-import type { FileMatch, FileScanResult, ScanProgress, ScanSummary } from '../types'
+import FileDetail from './FileDetail.vue'
+import type { FileMatch, FileDetails, FileScanResult, ScanProgress, ScanSummary } from '../types'
 
 const emit = defineEmits<{ summary: [ScanSummary] }>()
 
@@ -15,6 +16,13 @@ const progress = ref<ScanProgress | null>(null)
 const error = ref('')
 const filter = ref('')
 const copiedPath = ref('')
+const selected = ref<Set<string>>(new Set())
+const confirmDelete = ref(false)
+const isDeleting = ref(false)
+const deleteErrors = ref<string[]>([])
+const selectedFile = ref<FileMatch | null>(null)
+const fileDetails = ref<FileDetails | null>(null)
+const isLoadingDetails = ref(false)
 
 let unlistenProgress: UnlistenFn | null = null
 let copiedTimer: ReturnType<typeof setTimeout> | null = null
@@ -24,6 +32,18 @@ const sortKey = ref<SortKey>('path')
 const sortAsc = ref(true)
 
 const matches = computed(() => result.value?.matches ?? [])
+
+const selectedItems = computed(() =>
+  result.value ? result.value.matches.filter((m: FileMatch) => selected.value.has(m.path)) : []
+)
+
+const allVisibleSelected = computed(() =>
+  visible.value.length > 0 && visible.value.every((m: FileMatch) => selected.value.has(m.path))
+)
+
+const someVisibleSelected = computed(() =>
+  visible.value.some((m: FileMatch) => selected.value.has(m.path)) && !allVisibleSelected.value
+)
 
 const visible = computed(() => {
   const q = filter.value.toLowerCase()
@@ -62,6 +82,9 @@ async function startScan(name: string) {
   error.value = ''
   filter.value = ''
   result.value = null
+  selected.value = new Set()
+  selectedFile.value = null
+  fileDetails.value = null
   progress.value = { scanned_dirs: 0, found: 0, current: '' }
   isScanning.value = true
 
@@ -83,6 +106,72 @@ async function startScan(name: string) {
 
 async function stopScan() {
   await invoke('cancel_file_scan')
+}
+
+function toggleSelect(path: string, e: Event) {
+  e.stopPropagation()
+  const next = new Set(selected.value)
+  if (next.has(path)) next.delete(path)
+  else next.add(path)
+  selected.value = next
+}
+
+function toggleSelectAll() {
+  if (allVisibleSelected.value) {
+    const next = new Set(selected.value)
+    visible.value.forEach((m: FileMatch) => next.delete(m.path))
+    selected.value = next
+  } else {
+    const next = new Set(selected.value)
+    visible.value.forEach((m: FileMatch) => next.add(m.path))
+    selected.value = next
+  }
+}
+
+async function selectFile(m: FileMatch) {
+  if (selectedFile.value?.path === m.path) {
+    selectedFile.value = null
+    fileDetails.value = null
+    return
+  }
+  selectedFile.value = m
+  fileDetails.value = null
+  isLoadingDetails.value = true
+  try {
+    fileDetails.value = await invoke<FileDetails>('get_file_details', { path: m.path })
+  } catch {
+    // leave fileDetails null; panel shows path info without extras
+  } finally {
+    isLoadingDetails.value = false
+  }
+}
+
+interface DeleteResponse {
+  deleted: string[]
+  failed: { path: string; error: string }[]
+}
+
+async function executeDelete() {
+  isDeleting.value = true
+  deleteErrors.value = []
+  try {
+    const paths = [...selected.value]
+    const res = await invoke<DeleteResponse>('delete_files', { paths })
+    if (res.deleted.length && result.value) {
+      const deletedSet = new Set(res.deleted)
+      result.value = { ...result.value, matches: result.value.matches.filter((m: FileMatch) => !deletedSet.has(m.path)) }
+      selected.value = new Set([...selected.value].filter(p => !deletedSet.has(p)))
+    }
+    if (res.failed.length) {
+      deleteErrors.value = res.failed.map((f: { path: string; error: string }) => `${f.path}: ${f.error}`)
+    } else {
+      confirmDelete.value = false
+    }
+  } catch (e) {
+    deleteErrors.value = [typeof e === 'string' ? e : String(e)]
+  } finally {
+    isDeleting.value = false
+  }
 }
 
 async function stopListening() {
@@ -141,6 +230,8 @@ function rowClass(m: FileMatch): string {
   if (m.exact) parts.push('exact')
   if (m.is_dir) parts.push('dir')
   if (m.path === copiedPath.value) parts.push('copied')
+  if (selected.value.has(m.path)) parts.push('selected')
+  if (selectedFile.value?.path === m.path) parts.push('active')
   return parts.join(' ')
 }
 
@@ -168,7 +259,7 @@ defineExpose({ openDialog })
     <!-- Scanning -->
     <div v-if="isScanning" class="center-state">
       <span class="spin-lg">↺</span>
-      <div class="state-title">Scanning this computer for “{{ query }}”</div>
+      <div class="state-title">Scanning this computer for "{{ query }}"</div>
       <div class="progress-stats">
         <span><b>{{ progress?.found ?? 0 }}</b> found</span>
         <span class="sep">·</span>
@@ -216,69 +307,106 @@ defineExpose({ openDialog })
             placeholder="Filter results by path…"
             spellcheck="false"
           />
+          <button
+            v-if="selected.size"
+            class="btn danger"
+            @click="confirmDelete = true; deleteErrors = []"
+          >
+            Delete {{ selected.size }} {{ selected.size === 1 ? 'item' : 'items' }}
+          </button>
           <button class="btn primary" @click="openDialog">Scan file</button>
         </div>
       </div>
 
-      <div v-if="!matches.length" class="center-state grow">
-        <span class="state-icon">🔍</span>
-        <div class="state-title">No files named “{{ result.query }}”</div>
-        <div class="state-sub">
-          Searched {{ result.scanned_dirs.toLocaleString() }} folders in
-          {{ formatElapsed(result.elapsed_ms) }}.
-          <template v-if="result.denied">
-            {{ result.denied.toLocaleString() }} folders were unreadable.
-          </template>
+      <div class="content">
+        <div v-if="!matches.length" class="center-state grow">
+          <span class="state-icon">🔍</span>
+          <div class="state-title">No files named "{{ result.query }}"</div>
+          <div class="state-sub">
+            Searched {{ result.scanned_dirs.toLocaleString() }} folders in
+            {{ formatElapsed(result.elapsed_ms) }}.
+            <template v-if="result.denied">
+              {{ result.denied.toLocaleString() }} folders were unreadable.
+            </template>
+          </div>
+          <button class="btn primary" @click="openDialog">Try another name</button>
         </div>
-        <button class="btn primary" @click="openDialog">Try another name</button>
-      </div>
 
-      <div v-else-if="!visible.length" class="center-state grow">
-        <span class="state-sub">No result matches the filter “{{ filter }}”.</span>
-      </div>
+        <div v-else-if="!visible.length" class="center-state grow">
+          <span class="state-sub">No result matches the filter "{{ filter }}".</span>
+        </div>
 
-      <div v-else class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th @click="setSort('name')" class="sortable">Name{{ sortIcon('name') }}</th>
-              <th @click="setSort('path')" class="sortable">Location{{ sortIcon('path') }}</th>
-              <th @click="setSort('size')" class="sortable num">Size{{ sortIcon('size') }}</th>
-              <th @click="setSort('modified')" class="sortable">Modified{{ sortIcon('modified') }}</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="m in visible"
-              :key="m.path"
-              :class="rowClass(m)"
-              @click="copyPath(m.path)"
-              :title="m.path"
-            >
-              <td class="name">
-                <span class="name-cell">
-                  <span class="kind">{{ m.is_dir ? '📁' : '📄' }}</span>
-                  <span class="name-text">{{ m.name }}</span>
-                  <span v-if="m.exact" class="tag exact">exact</span>
-                </span>
-              </td>
-              <td class="path mono"><bdi>{{ m.parent }}</bdi></td>
-              <td class="size mono num">{{ m.is_dir ? '—' : formatSize(m.size) }}</td>
-              <td class="modified">{{ formatDate(m.modified) }}</td>
-              <td class="action">
-                <button
-                  class="copy-btn"
-                  :class="{ done: m.path === copiedPath }"
-                  @click.stop="copyPath(m.path)"
-                  :title="m.path === copiedPath ? 'Copied' : 'Copy full path'"
-                >
-                  {{ m.path === copiedPath ? '✓' : '⧉' }}
-                </button>
-              </td>
-            </tr>
-          </tbody>
-        </table>
+        <div v-else class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th class="check-col">
+                  <input
+                    type="checkbox"
+                    class="row-check"
+                    :checked="allVisibleSelected"
+                    :indeterminate="someVisibleSelected"
+                    @change="toggleSelectAll"
+                    title="Select all visible"
+                  />
+                </th>
+                <th @click="setSort('name')" class="sortable">Name{{ sortIcon('name') }}</th>
+                <th @click="setSort('path')" class="sortable">Location{{ sortIcon('path') }}</th>
+                <th @click="setSort('size')" class="sortable num">Size{{ sortIcon('size') }}</th>
+                <th @click="setSort('modified')" class="sortable">Modified{{ sortIcon('modified') }}</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="m in visible"
+                :key="m.path"
+                :class="rowClass(m)"
+                @click="selectFile(m)"
+                :title="m.path"
+              >
+                <td class="check-col" @click.stop>
+                  <input
+                    type="checkbox"
+                    class="row-check"
+                    :checked="selected.has(m.path)"
+                    @change="toggleSelect(m.path, $event)"
+                  />
+                </td>
+                <td class="name">
+                  <span class="name-cell">
+                    <span class="kind">{{ m.is_dir ? '📁' : '📄' }}</span>
+                    <span class="name-text">{{ m.name }}</span>
+                    <span v-if="m.exact" class="tag exact">exact</span>
+                  </span>
+                </td>
+                <td class="path mono"><bdi>{{ m.parent }}</bdi></td>
+                <td class="size mono num">{{ m.is_dir ? '—' : formatSize(m.size) }}</td>
+                <td class="modified">{{ formatDate(m.modified) }}</td>
+                <td class="action">
+                  <button
+                    class="copy-btn"
+                    :class="{ done: m.path === copiedPath }"
+                    @click.stop="copyPath(m.path)"
+                    :title="m.path === copiedPath ? 'Copied' : 'Copy full path'"
+                  >
+                    {{ m.path === copiedPath ? '✓' : '⧉' }}
+                  </button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <Transition name="panel">
+          <FileDetail
+            v-if="selectedFile"
+            :file="selectedFile"
+            :details="fileDetails"
+            :is-loading="isLoadingDetails"
+            @close="selectedFile = null; fileDetails = null"
+          />
+        </Transition>
       </div>
     </div>
 
@@ -288,6 +416,43 @@ defineExpose({ openDialog })
       @search="startScan"
       @close="dialogOpen = false"
     />
+
+    <div v-if="confirmDelete" class="modal-overlay" @click.self="confirmDelete = false; deleteErrors = []">
+      <div class="modal">
+        <div class="modal-title">
+          Delete {{ selected.size }} {{ selected.size === 1 ? 'item' : 'items' }}?
+        </div>
+        <div class="modal-body">
+          <div v-if="selectedItems.some(m => m.is_dir)" class="modal-warn">
+            ⚠ Directories will be deleted along with all their contents.
+          </div>
+          <ul class="delete-list">
+            <li v-for="m in selectedItems.slice(0, 8)" :key="m.path" class="delete-path mono">
+              {{ m.is_dir ? '📁' : '📄' }} {{ m.path }}
+            </li>
+            <li v-if="selectedItems.length > 8" class="delete-more">
+              …and {{ selectedItems.length - 8 }} more
+            </li>
+          </ul>
+          <div v-if="deleteErrors.length" class="delete-errors">
+            <div class="delete-errors-title">Some items could not be deleted:</div>
+            <div v-for="e in deleteErrors" :key="e" class="delete-error mono">{{ e }}</div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button
+            class="btn ghost"
+            @click="confirmDelete = false; deleteErrors = []"
+            :disabled="isDeleting"
+          >
+            Cancel
+          </button>
+          <button class="btn danger" @click="executeDelete" :disabled="isDeleting">
+            {{ isDeleting ? 'Deleting…' : `Delete ${selected.size} ${selected.size === 1 ? 'item' : 'items'}` }}
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -355,9 +520,23 @@ defineExpose({ openDialog })
 }
 .btn.primary:hover { filter: brightness(1.08); }
 .btn.big { padding: 10px 20px; font-size: 13px; margin-top: 4px; }
+.btn.danger {
+  background: var(--red, #da3633);
+  border-color: var(--red, #da3633);
+  color: #fff;
+  font-weight: 600;
+}
+.btn.danger:hover { filter: brightness(1.1); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* Results */
 .results { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.content { display: flex; flex: 1; overflow: hidden; }
+
+.panel-enter-active, .panel-leave-active {
+  transition: transform 0.2s ease, opacity 0.2s ease;
+}
+.panel-enter-from, .panel-leave-to { transform: translateX(100%); opacity: 0; }
 
 .results-bar {
   display: flex;
@@ -473,4 +652,121 @@ td {
 }
 .copy-btn:hover { color: var(--accent); background: var(--surface-2); }
 .copy-btn.done { color: var(--green); }
+
+/* Checkbox column */
+.check-col { width: 36px; text-align: center; padding: 7px 8px; }
+thead .check-col { padding: 8px 8px; }
+
+.row-check {
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
+.row.selected { background: rgba(88, 166, 255, 0.08); }
+.row.selected:hover { background: rgba(88, 166, 255, 0.14); }
+.row.active { background: rgba(88, 166, 255, 0.1); outline: 1px solid rgba(88, 166, 255, 0.3); }
+.row.active:hover { background: rgba(88, 166, 255, 0.16); }
+
+/* Confirm delete modal */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  width: 480px;
+  max-width: 90vw;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.modal-title {
+  padding: 16px 20px 12px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-body {
+  padding: 14px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.modal-warn {
+  font-size: 12px;
+  color: var(--orange, #e3b341);
+  background: rgba(227, 179, 65, 0.1);
+  border: 1px solid rgba(227, 179, 65, 0.25);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+
+.delete-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.delete-path {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.delete-more {
+  font-size: 11px;
+  color: var(--muted);
+  opacity: 0.7;
+  font-style: italic;
+}
+
+.delete-errors {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.delete-errors-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--red, #da3633);
+}
+
+.delete-error {
+  font-size: 11px;
+  color: var(--muted);
+  word-break: break-all;
+}
+
+.modal-footer {
+  padding: 12px 20px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
 </style>

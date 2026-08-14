@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -315,6 +316,213 @@ pub async fn scan_files(
 #[tauri::command]
 pub fn cancel_file_scan(state: State<'_, ScanState>) {
     state.cancel.store(true, Ordering::SeqCst);
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeleteFailure {
+    pub path: String,
+    pub error: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeleteResult {
+    pub deleted: Vec<String>,
+    pub failed: Vec<DeleteFailure>,
+}
+
+#[tauri::command]
+pub async fn delete_files(paths: Vec<String>) -> Result<DeleteResult, String> {
+    tokio::task::spawn_blocking(move || {
+        let mut deleted = Vec::new();
+        let mut failed = Vec::new();
+        for path_str in paths {
+            let path = std::path::Path::new(&path_str);
+            let result = if path.is_dir() {
+                std::fs::remove_dir_all(path)
+            } else {
+                std::fs::remove_file(path)
+            };
+            match result {
+                Ok(()) => deleted.push(path_str),
+                Err(e) => failed.push(DeleteFailure { path: path_str, error: e.to_string() }),
+            }
+        }
+        DeleteResult { deleted, failed }
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct FileProcess {
+    pub pid: u32,
+    pub name: String,
+    pub access: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FileDetails {
+    pub path: String,
+    pub size: u64,
+    pub modified: Option<u64>,
+    pub created: Option<u64>,
+    pub is_dir: bool,
+    pub permissions: String,
+    pub kind: String,
+    pub processes: Vec<FileProcess>,
+}
+
+fn file_kind(path: &Path, is_dir: bool) -> String {
+    if is_dir {
+        return "Directory".to_string();
+    }
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .as_deref()
+    {
+        Some("pdf") => "PDF Document".to_string(),
+        Some("png") | Some("jpg") | Some("jpeg") | Some("gif")
+        | Some("webp") | Some("svg") | Some("heic") | Some("bmp")
+        | Some("tiff") | Some("ico") => "Image File".to_string(),
+        Some("mp4") | Some("mov") | Some("avi") | Some("mkv")
+        | Some("m4v") | Some("wmv") => "Video File".to_string(),
+        Some("mp3") | Some("flac") | Some("m4a") | Some("wav")
+        | Some("aac") | Some("ogg") => "Audio File".to_string(),
+        Some("zip") | Some("tar") | Some("gz") | Some("bz2")
+        | Some("xz") | Some("7z") | Some("rar") | Some("tgz") => "Archive".to_string(),
+        Some("app") => "Application Bundle".to_string(),
+        Some("dmg") => "Disk Image".to_string(),
+        Some("pkg") => "Installer Package".to_string(),
+        Some(ext) => format!("{} File", ext.to_uppercase()),
+        None => "File".to_string(),
+    }
+}
+
+#[cfg(unix)]
+fn format_permissions(mode: u32) -> String {
+    let bits = [
+        (0o400, 'r'), (0o200, 'w'), (0o100, 'x'),
+        (0o040, 'r'), (0o020, 'w'), (0o010, 'x'),
+        (0o004, 'r'), (0o002, 'w'), (0o001, 'x'),
+    ];
+    bits.iter()
+        .map(|(mask, ch)| if mode & mask != 0 { *ch } else { '-' })
+        .collect()
+}
+
+#[cfg(not(unix))]
+fn format_permissions(meta: &std::fs::Metadata) -> String {
+    if meta.permissions().readonly() { "read-only".to_string() } else { "read-write".to_string() }
+}
+
+fn infer_access(fds: &[String]) -> String {
+    let (mut r, mut w, mut txt, mut mem, mut cwd) = (false, false, false, false, false);
+    for fd in fds {
+        match fd.to_lowercase().as_str() {
+            "txt" => txt = true,
+            "mem" => mem = true,
+            "cwd" => cwd = true,
+            _ => match fd.chars().last() {
+                Some('r') => r = true,
+                Some('w') => w = true,
+                Some('u') => { r = true; w = true; }
+                _ => {}
+            },
+        }
+    }
+    if r && w   { "read / write".to_string() }
+    else if w   { "write".to_string() }
+    else if r   { "read".to_string() }
+    else if txt { "code segment".to_string() }
+    else if mem { "memory-mapped".to_string() }
+    else if cwd { "working directory".to_string() }
+    else        { "open".to_string() }
+}
+
+fn get_file_processes(path: &str) -> Vec<FileProcess> {
+    let out = Command::new("lsof").args(["--", path]).output();
+    match out {
+        Ok(o) => parse_lsof_for_file(&String::from_utf8_lossy(&o.stdout)),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn parse_lsof_for_file(output: &str) -> Vec<FileProcess> {
+    use std::collections::BTreeMap;
+    // group fd types by pid; BTreeMap keeps insertion order by pid
+    let mut by_pid: BTreeMap<u32, (String, Vec<String>)> = BTreeMap::new();
+    for line in output.lines().skip(1) {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 4 { continue; }
+        let pid: u32 = match parts[1].parse() { Ok(p) => p, Err(_) => continue };
+        let name = parts[0].to_string();
+        let fd   = parts[3].to_string();
+        by_pid.entry(pid).or_insert_with(|| (name, Vec::new())).1.push(fd);
+    }
+    by_pid
+        .into_iter()
+        .map(|(pid, (name, fds))| FileProcess { pid, name, access: infer_access(&fds) })
+        .collect()
+}
+
+#[tauri::command]
+pub fn reveal_in_finder(path: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    Command::new("open")
+        .args(["-R", &path])
+        .spawn()
+        .map_err(|e| e.to_string())?;
+
+    #[cfg(target_os = "windows")]
+    Command::new("explorer")
+        .arg(format!("/select,{}", path))
+        .spawn()
+        .map_err(|e| e.to_string())?;
+
+    #[cfg(target_os = "linux")]
+    Command::new("xdg-open")
+        .arg(
+            std::path::Path::new(&path)
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or(path),
+        )
+        .spawn()
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_file_details(path: String) -> Result<FileDetails, String> {
+    tokio::task::spawn_blocking(move || {
+        let p = Path::new(&path);
+        let meta = std::fs::metadata(p).map_err(|e| e.to_string())?;
+
+        let modified = modified_secs(&meta);
+        let created  = meta.created().ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+
+        #[cfg(unix)]
+        let permissions = {
+            use std::os::unix::fs::PermissionsExt;
+            format_permissions(meta.permissions().mode())
+        };
+        #[cfg(not(unix))]
+        let permissions = format_permissions(&meta);
+
+        let is_dir  = meta.is_dir();
+        let size    = meta.len();
+        let kind    = file_kind(p, is_dir);
+        let processes = get_file_processes(&path);
+
+        Ok(FileDetails { path, size, modified, created, is_dir, permissions, kind, processes })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[cfg(test)]

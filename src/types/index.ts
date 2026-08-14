@@ -63,6 +63,23 @@ export interface ScanProgress {
   current: string
 }
 
+export interface FileProcess {
+  pid: number
+  name: string
+  access: string
+}
+
+export interface FileDetails {
+  path: string
+  size: number
+  modified: number | null
+  created: number | null
+  is_dir: boolean
+  permissions: string
+  kind: string
+  processes: FileProcess[]
+}
+
 export interface ScanSummary {
   matches: number
   scannedDirs: number

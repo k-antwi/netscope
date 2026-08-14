@@ -1,6 +1,6 @@
 mod file_scan;
 
-use file_scan::{cancel_file_scan, scan_files, ScanState};
+use file_scan::{cancel_file_scan, delete_files, get_file_details, reveal_in_finder, scan_files, ScanState};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -709,7 +709,7 @@ pub fn run() {
             tauri::async_runtime::spawn(start_ws_server(handle));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_connections, investigate_ip, get_inbound, investigate_service, get_issues, scan_files, cancel_file_scan])
+        .invoke_handler(tauri::generate_handler![get_connections, investigate_ip, get_inbound, investigate_service, get_issues, scan_files, cancel_file_scan, delete_files, get_file_details, reveal_in_finder])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
