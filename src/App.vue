@@ -68,6 +68,16 @@ body { background: var(--bg); color: var(--text); }
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
   user-select: none;
+  -webkit-app-region: drag;
+}
+
+/* Interactive children must opt out of the drag region */
+.app-header button,
+.app-header a,
+.app-header input,
+.app-header select,
+.app-header label {
+  -webkit-app-region: no-drag;
 }
 
 .brand {
