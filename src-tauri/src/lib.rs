@@ -1,8 +1,11 @@
 mod file_scan;
 
 use file_scan::{cancel_file_scan, scan_files, ScanState};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::process::Command;
+use tauri::Emitter;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Connection {
@@ -233,15 +236,480 @@ async fn investigate_ip(ip: String, port: u16) -> Result<IpInvestigation, String
     })
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct InboundConnection {
+    pub process: String,
+    pub pid: u32,
+    pub local_ip: String,
+    pub local_port: u16,
+    pub remote_ip: String,
+    pub remote_port: u16,
+    pub state: String,
+    pub is_encrypted: bool,
+    pub is_localhost_only: bool,
+    pub is_all_interfaces: bool,
+}
+
+fn parse_addr(addr: &str) -> Option<(String, u16)> {
+    if addr.starts_with('[') {
+        let b = addr.rfind("]:")?;
+        Some((addr[1..b].to_string(), addr[b + 2..].parse().ok()?))
+    } else {
+        let c = addr.rfind(':')?;
+        Some((addr[..c].to_string(), addr[c + 1..].parse().ok()?))
+    }
+}
+
+fn parse_inbound(output: &str, show_local: bool) -> Vec<InboundConnection> {
+    let mut results = Vec::new();
+    let mut listen_ports: HashSet<u16> = HashSet::new();
+    let encrypted_ports: HashSet<u16> = [443, 465, 587, 993, 8443].iter().cloned().collect();
+
+    // First pass: collect all LISTEN ports for inbound ESTABLISHED detection
+    for line in output.lines().skip(1) {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 10 { continue; }
+        let state = parts[9].trim_matches(|c| c == '(' || c == ')');
+        if state != "LISTEN" { continue; }
+        let name = parts[8];
+        if name.contains("->") { continue; }
+        if let Some((_, port)) = parse_addr(name) {
+            listen_ports.insert(port);
+        }
+    }
+
+    // Second pass: emit LISTEN entries + inbound ESTABLISHED
+    for line in output.lines().skip(1) {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 9 { continue; }
+
+        let name = parts[8];
+        let state = if parts.len() > 9 {
+            parts[9].trim_matches(|c| c == '(' || c == ')')
+        } else {
+            ""
+        };
+
+        let process = parts[0].to_string();
+        let pid: u32 = parts[1].parse().unwrap_or(0);
+
+        if state == "LISTEN" && !name.contains("->") {
+            if let Some((local_ip, local_port)) = parse_addr(name) {
+                let is_localhost_only =
+                    local_ip == "127.0.0.1" || local_ip == "::1" || local_ip == "localhost";
+                let is_all_interfaces = local_ip == "*";
+
+                if !show_local && is_localhost_only { continue; }
+
+                results.push(InboundConnection {
+                    process,
+                    pid,
+                    local_ip,
+                    local_port,
+                    remote_ip: String::new(),
+                    remote_port: 0,
+                    state: "LISTEN".to_string(),
+                    is_encrypted: encrypted_ports.contains(&local_port),
+                    is_localhost_only,
+                    is_all_interfaces,
+                });
+            }
+        } else if state == "ESTABLISHED" && name.contains("->") {
+            let arrow = match name.find("->") { Some(p) => p, None => continue };
+            let (Some((local_ip, local_port)), Some((remote_ip, remote_port))) = (
+                parse_addr(&name[..arrow]),
+                parse_addr(&name[arrow + 2..]),
+            ) else { continue };
+
+            // Only treat as inbound if local port is a known server port
+            if !listen_ports.contains(&local_port) { continue; }
+
+            let is_localhost_only =
+                remote_ip == "127.0.0.1" || remote_ip == "::1" || remote_ip.starts_with("fe80:");
+            if !show_local && is_localhost_only { continue; }
+
+            results.push(InboundConnection {
+                process,
+                pid,
+                local_ip,
+                local_port,
+                remote_ip,
+                remote_port,
+                state: "ESTABLISHED".to_string(),
+                is_encrypted: encrypted_ports.contains(&local_port),
+                is_localhost_only,
+                is_all_interfaces: false,
+            });
+        }
+    }
+
+    results
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RemoteTrace {
+    pub ip: String,
+    pub rdns: String,
+    pub org: String,
+    pub country: String,
+    pub city: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ServiceInvestigation {
+    pub pid: u32,
+    pub process_path: String,
+    pub local_port: u16,
+    pub local_ip: String,
+    pub service_name: String,
+    pub exposure: String,
+    pub active_connections: u32,
+    pub is_encrypted: bool,
+    pub warnings: Vec<String>,
+    pub active_remotes: Vec<RemoteTrace>,
+}
+
+const ENCRYPTED_PORTS: &[u16] = &[443, 465, 587, 993, 8443];
+const WELL_KNOWN_SERVICES: &[(u16, &str)] = &[
+    (21, "FTP"), (22, "SSH"), (23, "Telnet"), (25, "SMTP"), (53, "DNS"),
+    (80, "HTTP"), (110, "POP3"), (143, "IMAP"), (443, "HTTPS"),
+    (3306, "MySQL"), (5432, "PostgreSQL"), (6379, "Redis"),
+    (8080, "HTTP-ALT"), (8443, "HTTPS-ALT"), (27017, "MongoDB"),
+];
+
+fn known_service(port: u16) -> String {
+    WELL_KNOWN_SERVICES.iter()
+        .find(|(p, _)| *p == port)
+        .map(|(_, name)| name.to_string())
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+async fn investigate_service(pid: u32, local_port: u16, local_ip: String) -> Result<ServiceInvestigation, String> {
+    // Phase 1: process path + full lsof for this port (parallel)
+    let (process_path, lsof_raw) = tokio::join!(
+        shell_async(format!("ps -p {} -o args= 2>/dev/null | head -1", pid)),
+        shell_async(format!("lsof -i :{} -n -P 2>/dev/null", local_port)),
+    );
+
+    // Parse unique remote IPs from ESTABLISHED connections (cap at 10)
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut remote_ips: Vec<String> = Vec::new();
+    for line in lsof_raw.lines() {
+        if !line.contains("ESTABLISHED") { continue; }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 9 { continue; }
+        let name = parts[8];
+        if let Some(arrow) = name.find("->") {
+            if let Some((ip, _)) = parse_addr(&name[arrow + 2..]) {
+                if seen.insert(ip.clone()) && remote_ips.len() < 10 {
+                    remote_ips.push(ip);
+                }
+            }
+        }
+    }
+
+    let active_connections = remote_ips.len() as u32;
+
+    // Phase 2: trace each remote IP concurrently
+    let trace_handles: Vec<_> = remote_ips
+        .into_iter()
+        .map(|ip| {
+            tokio::task::spawn_blocking(move || {
+                let rdns = shell(&format!("dig -x {} +short 2>/dev/null | head -1", ip));
+                let ipinfo_raw = shell(&format!(
+                    "curl -s --max-time 4 https://ipinfo.io/{}/json 2>/dev/null",
+                    ip
+                ));
+                let info: serde_json::Value =
+                    serde_json::from_str(&ipinfo_raw).unwrap_or_default();
+                RemoteTrace {
+                    ip,
+                    rdns,
+                    org: info["org"].as_str().unwrap_or("").to_string(),
+                    country: info["country"].as_str().unwrap_or("").to_string(),
+                    city: info["city"].as_str().unwrap_or("").to_string(),
+                }
+            })
+        })
+        .collect();
+
+    let mut active_remotes: Vec<RemoteTrace> = Vec::new();
+    for handle in trace_handles {
+        if let Ok(trace) = handle.await {
+            active_remotes.push(trace);
+        }
+    }
+
+    let is_encrypted = ENCRYPTED_PORTS.contains(&local_port);
+    let service_name = known_service(local_port);
+    let is_all_interfaces = local_ip == "*" || local_ip == "0.0.0.0" || local_ip == "::";
+
+    let exposure = if is_all_interfaces {
+        "Internet-facing (all interfaces)".to_string()
+    } else if local_ip == "127.0.0.1" || local_ip == "::1" {
+        "Localhost only — not externally reachable".to_string()
+    } else {
+        format!("Bound to {}", local_ip)
+    };
+
+    let mut warnings: Vec<String> = Vec::new();
+    if is_all_interfaces && !is_encrypted {
+        warnings.push(format!(
+            "Port {} is exposed on all interfaces without TLS encryption",
+            local_port
+        ));
+    }
+    if local_port == 23 {
+        warnings.push("Telnet is unencrypted and should not be exposed".to_string());
+    }
+    if local_port == 21 {
+        warnings.push("FTP transmits credentials in plaintext".to_string());
+    }
+    if local_port == 80 && is_all_interfaces {
+        warnings.push("HTTP is unencrypted — consider redirecting to HTTPS".to_string());
+    }
+
+    Ok(ServiceInvestigation {
+        pid,
+        process_path: process_path.trim().to_string(),
+        local_port,
+        local_ip,
+        service_name,
+        exposure,
+        active_connections,
+        is_encrypted,
+        warnings,
+        active_remotes,
+    })
+}
+
+#[tauri::command]
+fn get_inbound(show_local: bool) -> Result<Vec<InboundConnection>, String> {
+    let output = Command::new("lsof")
+        .args(["-i", "-n", "-P"])
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(parse_inbound(&stdout, show_local))
+}
+
+const DB_PORTS: &[(u16, &str)] = &[
+    (3306, "MySQL"), (5432, "PostgreSQL"), (6379, "Redis"),
+    (27017, "MongoDB"), (1433, "SQL Server"), (5984, "CouchDB"),
+    (9200, "Elasticsearch"), (9042, "Cassandra"),
+];
+
+const STANDARD_OUTBOUND: &[u16] = &[
+    21, 22, 25, 53, 80, 110, 143, 443, 465, 587, 993, 995,
+    8080, 8443, 123, 5228, 8888, 3000, 4000, 5000,
+];
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Issue {
+    pub severity: String,
+    pub category: String,
+    pub title: String,
+    pub detail: String,
+    pub process: String,
+    pub pid: u32,
+    pub port: Option<u16>,
+    pub remote_ip: Option<String>,
+}
+
+#[tauri::command]
+fn get_issues() -> Result<Vec<Issue>, String> {
+    let output = Command::new("lsof")
+        .args(["-i", "-n", "-P"])
+        .output()
+        .map_err(|e| e.to_string())?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    let inbound = parse_inbound(&stdout, false);
+    let outbound = parse_connections(&stdout, false);
+    let standard_ports: HashSet<u16> = STANDARD_OUTBOUND.iter().cloned().collect();
+
+    let mut issues: Vec<Issue> = Vec::new();
+
+    // --- Inbound: externally exposed services ---
+    for conn in &inbound {
+        if conn.state != "LISTEN" || !conn.is_all_interfaces { continue; }
+
+        if let Some((_, db_name)) = DB_PORTS.iter().find(|(p, _)| *p == conn.local_port) {
+            issues.push(Issue {
+                severity: "critical".to_string(),
+                category: "exposed-database".to_string(),
+                title: format!("{} database exposed to network", db_name),
+                detail: format!(
+                    "{} is listening on all interfaces (port {}). Anyone on the network may attempt to connect.",
+                    db_name, conn.local_port
+                ),
+                process: conn.process.clone(), pid: conn.pid,
+                port: Some(conn.local_port), remote_ip: None,
+            });
+            continue;
+        }
+
+        if conn.local_port == 23 {
+            issues.push(Issue {
+                severity: "critical".to_string(),
+                category: "plaintext-service".to_string(),
+                title: "Telnet service is exposed".to_string(),
+                detail: "Telnet transmits all traffic including passwords in plaintext. Disable this service immediately.".to_string(),
+                process: conn.process.clone(), pid: conn.pid,
+                port: Some(23), remote_ip: None,
+            });
+            continue;
+        }
+
+        if conn.local_port == 21 {
+            issues.push(Issue {
+                severity: "high".to_string(),
+                category: "plaintext-service".to_string(),
+                title: "FTP service is exposed".to_string(),
+                detail: "FTP sends credentials and data in plaintext. Use SFTP or FTPS instead.".to_string(),
+                process: conn.process.clone(), pid: conn.pid,
+                port: Some(21), remote_ip: None,
+            });
+            continue;
+        }
+
+        if conn.local_port == 80 {
+            issues.push(Issue {
+                severity: "warning".to_string(),
+                category: "unencrypted-exposure".to_string(),
+                title: "Unencrypted HTTP server exposed".to_string(),
+                detail: format!(
+                    "{} is serving HTTP on all interfaces. Traffic is unencrypted — consider redirecting to HTTPS.",
+                    conn.process
+                ),
+                process: conn.process.clone(), pid: conn.pid,
+                port: Some(80), remote_ip: None,
+            });
+            continue;
+        }
+
+        if !conn.is_encrypted {
+            issues.push(Issue {
+                severity: "warning".to_string(),
+                category: "unencrypted-exposure".to_string(),
+                title: format!("Port {} exposed without encryption", conn.local_port),
+                detail: format!(
+                    "{} is listening on all interfaces on port {} without TLS. Traffic to this service is unencrypted.",
+                    conn.process, conn.local_port
+                ),
+                process: conn.process.clone(), pid: conn.pid,
+                port: Some(conn.local_port), remote_ip: None,
+            });
+        }
+    }
+
+    // --- Outbound: unusual or plaintext traffic ---
+    let mut seen_outbound: HashSet<(String, u16)> = HashSet::new();
+    for conn in &outbound {
+        if conn.is_local { continue; }
+        if !seen_outbound.insert((conn.process.clone(), conn.remote_port)) { continue; }
+
+        if conn.remote_port == 80 {
+            issues.push(Issue {
+                severity: "info".to_string(),
+                category: "plaintext-outbound".to_string(),
+                title: format!("{} sending plaintext HTTP", conn.process),
+                detail: format!(
+                    "{} is connecting to external hosts over unencrypted HTTP (port 80). Traffic may be intercepted.",
+                    conn.process
+                ),
+                process: conn.process.clone(), pid: conn.pid,
+                port: Some(80), remote_ip: Some(conn.remote_ip.clone()),
+            });
+        } else if !standard_ports.contains(&conn.remote_port) {
+            issues.push(Issue {
+                severity: "info".to_string(),
+                category: "unusual-port".to_string(),
+                title: format!("{} using non-standard port {}", conn.process, conn.remote_port),
+                detail: format!(
+                    "{} connected to {}:{} — not a standard well-known service port.",
+                    conn.process, conn.remote_ip, conn.remote_port
+                ),
+                process: conn.process.clone(), pid: conn.pid,
+                port: Some(conn.remote_port), remote_ip: Some(conn.remote_ip.clone()),
+            });
+        }
+    }
+
+    let sev_order = |s: &str| match s { "critical" => 0, "high" => 1, "warning" => 2, _ => 3 };
+    issues.sort_by_key(|i| sev_order(&i.severity));
+    Ok(issues)
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserHeader {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserRequest {
+    pub id: String,
+    pub url: String,
+    pub method: String,
+    pub status: u16,
+    pub status_text: String,
+    pub request_headers: Vec<BrowserHeader>,
+    pub response_headers: Vec<BrowserHeader>,
+    pub request_body: Option<String>,
+    pub timing_ms: f64,
+    pub from_cache: bool,
+    pub initiator: String,
+    pub tab_url: String,
+    pub timestamp: f64,
+    pub error: Option<String>,
+}
+
+async fn start_ws_server(app_handle: tauri::AppHandle) {
+    let listener = match tokio::net::TcpListener::bind("127.0.0.1:9922").await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("[NetScope] WS server failed to bind :9922 — {}", e);
+            return;
+        }
+    };
+    eprintln!("[NetScope] Extension bridge listening on ws://127.0.0.1:9922");
+
+    while let Ok((stream, _)) = listener.accept().await {
+        let handle = app_handle.clone();
+        tokio::spawn(async move {
+            let ws = match tokio_tungstenite::accept_async(stream).await {
+                Ok(ws) => ws,
+                Err(_) => return,
+            };
+            let _ = handle.emit("extension-connected", ());
+            let (_, mut read) = ws.split();
+            while let Some(Ok(msg)) = read.next().await {
+                if let tokio_tungstenite::tungstenite::Message::Text(text) = msg {
+                    if let Ok(req) = serde_json::from_str::<BrowserRequest>(&text) {
+                        let _ = handle.emit("browser-request", &req);
+                    }
+                }
+            }
+            let _ = handle.emit("extension-disconnected", ());
+        });
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .manage(ScanState::default())
-        .invoke_handler(tauri::generate_handler![
-            get_connections,
-            investigate_ip,
-            scan_files,
-            cancel_file_scan
-        ])
+        .plugin(tauri_plugin_notification::init())
+        .setup(|app| {
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(start_ws_server(handle));
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![get_connections, investigate_ip, get_inbound, investigate_service, get_issues, scan_files, cancel_file_scan])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

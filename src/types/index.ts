@@ -9,6 +9,19 @@ export interface Connection {
   is_local: boolean
 }
 
+export interface InboundConnection {
+  process: string
+  pid: number
+  local_ip: string
+  local_port: number
+  remote_ip: string
+  remote_port: number
+  state: 'LISTEN' | 'ESTABLISHED'
+  is_encrypted: boolean
+  is_localhost_only: boolean
+  is_all_interfaces: boolean
+}
+
 export interface IpInvestigation {
   ip: string
   rdns: string
@@ -58,15 +71,75 @@ export interface ScanSummary {
   truncated: boolean
 }
 
+export interface RemoteTrace {
+  ip: string
+  rdns: string
+  org: string
+  country: string
+  city: string
+}
+
+export interface ServiceInvestigation {
+  pid: number
+  process_path: string
+  local_port: number
+  local_ip: string
+  service_name: string
+  exposure: string
+  active_connections: number
+  is_encrypted: boolean
+  warnings: string[]
+  active_remotes: RemoteTrace[]
+}
+
+export interface Issue {
+  severity: 'critical' | 'high' | 'warning' | 'info'
+  category: string
+  title: string
+  detail: string
+  process: string
+  pid: number
+  port: number | null
+  remote_ip: string | null
+}
+
+export interface BrowserHeader {
+  name: string
+  value: string
+}
+
+export interface BrowserRequest {
+  id: string
+  url: string
+  method: string
+  status: number
+  statusText: string
+  requestHeaders: BrowserHeader[]
+  responseHeaders: BrowserHeader[]
+  requestBody: string | null
+  timingMs: number
+  fromCache: boolean
+  initiator: string
+  tabUrl: string
+  timestamp: number
+  error: string | null
+}
+
 export const PORT_LABELS: Record<number, string> = {
   21: 'FTP',
   22: 'SSH',
   25: 'SMTP',
+  53: 'DNS',
   80: 'HTTP',
   443: 'HTTPS',
+  465: 'SMTPS',
   587: 'SMTP',
   993: 'IMAPS',
+  3306: 'MySQL',
+  5432: 'Postgres',
   5228: 'FCM',
+  6379: 'Redis',
   8080: 'HTTP-ALT',
   8443: 'HTTPS-ALT',
+  27017: 'MongoDB',
 }

@@ -4,5 +4,5 @@
   "description": "Default capabilities for NetScope",
   "platforms": ["macOS", "windows", "linux"],
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "notification:default"]
 }
