@@ -3,7 +3,13 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import ConnectionTable from './components/ConnectionTable.vue'
 import IpInspector from './components/IpInspector.vue'
-import type { Connection, IpInvestigation } from './types'
+import FileScan from './components/FileScan.vue'
+import type { Connection, IpInvestigation, ScanSummary } from './types'
+
+type View = 'connections' | 'files'
+const view = ref<View>('connections')
+const fileScan = ref<InstanceType<typeof FileScan> | null>(null)
+const scanSummary = ref<ScanSummary | null>(null)
 
 const connections = ref<Connection[]>([])
 const search = ref('')
@@ -83,6 +89,20 @@ function stopTimer() {
   }
 }
 
+function openScanDialog() {
+  fileScan.value?.openDialog()
+}
+
+const scanStatusText = computed(() => {
+  const s = scanSummary.value
+  if (!s) return 'no scan yet'
+  if (s.isScanning) return `scanning… ${s.scannedDirs.toLocaleString()} folders`
+  if (s.elapsedMs === null) return 'no scan yet'
+  return `${s.scannedDirs.toLocaleString()} folders in ${
+    s.elapsedMs < 1000 ? `${s.elapsedMs}ms` : `${(s.elapsedMs / 1000).toFixed(1)}s`
+  }`
+})
+
 watch([autoRefresh, refreshInterval], startTimer)
 watch(showLocal, fetchConnections)
 
@@ -101,7 +121,25 @@ onUnmounted(stopTimer)
         <span class="brand-icon">⬡</span>
         <span class="brand-name">NetScope</span>
       </div>
-      <div class="controls">
+
+      <nav class="tabs">
+        <button
+          class="tab"
+          :class="{ active: view === 'connections' }"
+          @click="view = 'connections'"
+        >
+          Connections
+        </button>
+        <button
+          class="tab"
+          :class="{ active: view === 'files' }"
+          @click="view = 'files'"
+        >
+          File Scan
+        </button>
+      </nav>
+
+      <div v-if="view === 'connections'" class="controls">
         <input
           v-model="search"
           class="search"
@@ -126,35 +164,54 @@ onUnmounted(stopTimer)
           <span :class="{ spin: isLoading }">↺</span>
         </button>
       </div>
+
+      <div v-else class="controls">
+        <button class="scan-btn" @click="openScanDialog" :disabled="scanSummary?.isScanning">
+          Scan file
+        </button>
+      </div>
     </header>
 
     <main class="main">
-      <ConnectionTable
-        :connections="filteredConnections"
-        :is-loading="isLoading"
-        :selected-ip="selectedIp"
-        @investigate="handleInvestigate"
-      />
-      <Transition name="panel">
-        <IpInspector
-          v-if="selectedIp"
-          :ip="selectedIp"
-          :port="selectedPort"
-          :investigation="investigation"
-          :is-loading="isInvestigating"
-          @close="closeInspector"
+      <template v-if="view === 'connections'">
+        <ConnectionTable
+          :connections="filteredConnections"
+          :is-loading="isLoading"
+          :selected-ip="selectedIp"
+          @investigate="handleInvestigate"
         />
-      </Transition>
+        <Transition name="panel">
+          <IpInspector
+            v-if="selectedIp"
+            :ip="selectedIp"
+            :port="selectedPort"
+            :investigation="investigation"
+            :is-loading="isInvestigating"
+            @close="closeInspector"
+          />
+        </Transition>
+      </template>
+
+      <FileScan v-show="view === 'files'" ref="fileScan" @summary="scanSummary = $event" />
     </main>
 
     <footer class="statusbar">
-      <span class="stat">
-        <span class="stat-value">{{ filteredConnections.length }}</span> connections
-      </span>
-      <span class="stat">
-        <span class="stat-value https">{{ httpsCount }}</span> HTTPS
-      </span>
-      <span class="stat muted">{{ lastRefreshText }}</span>
+      <template v-if="view === 'connections'">
+        <span class="stat">
+          <span class="stat-value">{{ filteredConnections.length }}</span> connections
+        </span>
+        <span class="stat">
+          <span class="stat-value https">{{ httpsCount }}</span> HTTPS
+        </span>
+        <span class="stat muted">{{ lastRefreshText }}</span>
+      </template>
+      <template v-else>
+        <span class="stat">
+          <span class="stat-value">{{ scanSummary?.matches ?? 0 }}</span> matches
+        </span>
+        <span v-if="scanSummary?.truncated" class="stat warn">result limit reached</span>
+        <span class="stat muted">{{ scanStatusText }}</span>
+      </template>
     </footer>
   </div>
 </template>
@@ -215,6 +272,50 @@ body { background: var(--bg); color: var(--text); }
 }
 
 .brand-icon { font-size: 18px; }
+
+/* View tabs */
+.tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 2px;
+}
+
+.tab {
+  background: none;
+  border: none;
+  border-radius: 5px;
+  padding: 4px 12px;
+  color: var(--muted);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  line-height: 1.6;
+}
+.tab:hover { color: var(--text); }
+.tab.active {
+  background: var(--bg);
+  color: var(--accent);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+
+.scan-btn {
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 5px 14px;
+  color: #0d1117;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+}
+.scan-btn:hover { filter: brightness(1.08); }
+.scan-btn:disabled { opacity: 0.4; cursor: not-allowed; filter: none; }
 
 .controls {
   display: flex;
@@ -299,6 +400,7 @@ body { background: var(--bg); color: var(--text); }
 .stat { display: flex; gap: 4px; }
 .stat-value { color: var(--text); font-variant-numeric: tabular-nums; }
 .stat-value.https { color: var(--green); }
+.stat.warn { color: var(--orange); }
 .muted { color: var(--muted); margin-left: auto; }
 
 /* Panel transition */

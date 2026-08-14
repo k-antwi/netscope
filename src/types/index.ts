@@ -23,6 +23,41 @@ export interface IpInvestigation {
   suspicious_reasons: string[]
 }
 
+export interface FileMatch {
+  name: string
+  path: string
+  parent: string
+  size: number
+  modified: number | null
+  is_dir: boolean
+  exact: boolean
+}
+
+export interface FileScanResult {
+  query: string
+  matches: FileMatch[]
+  scanned_dirs: number
+  roots: string[]
+  elapsed_ms: number
+  truncated: boolean
+  cancelled: boolean
+  denied: number
+}
+
+export interface ScanProgress {
+  scanned_dirs: number
+  found: number
+  current: string
+}
+
+export interface ScanSummary {
+  matches: number
+  scannedDirs: number
+  elapsedMs: number | null
+  isScanning: boolean
+  truncated: boolean
+}
+
 export const PORT_LABELS: Record<number, string> = {
   21: 'FTP',
   22: 'SSH',

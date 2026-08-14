@@ -1,3 +1,6 @@
+mod file_scan;
+
+use file_scan::{cancel_file_scan, scan_files, ScanState};
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 
@@ -232,7 +235,13 @@ async fn investigate_ip(ip: String, port: u16) -> Result<IpInvestigation, String
 
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![get_connections, investigate_ip])
+        .manage(ScanState::default())
+        .invoke_handler(tauri::generate_handler![
+            get_connections,
+            investigate_ip,
+            scan_files,
+            cancel_file_scan
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
