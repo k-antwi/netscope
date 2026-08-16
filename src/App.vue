@@ -16,21 +16,16 @@ const badges = computed(() => ({ alerts: urgentCount.value }))
 
 <template>
   <div class="app">
-    <header class="app-header" data-tauri-drag-region>
-      <div class="brand">
-        <span class="brand-icon">⬡</span>
-        <span class="brand-name">NetScope</span>
-      </div>
-      <AppTabs :active-tab="activeTab" :badges="badges" @change="activeTab = $event" />
-    </header>
-
-    <KeepAlive>
-      <OutboundView v-if="activeTab === 'outbound'" />
-      <InboundView v-else-if="activeTab === 'inbound'" />
-      <AlertsView v-else-if="activeTab === 'alerts'" />
-      <BrowserView v-else-if="activeTab === 'browser'" />
-      <FileScanView v-else-if="activeTab === 'files'" />
-    </KeepAlive>
+    <AppTabs :active-tab="activeTab" :badges="badges" @change="activeTab = $event" />
+    <div class="app-content">
+      <KeepAlive>
+        <OutboundView v-if="activeTab === 'outbound'" />
+        <InboundView v-else-if="activeTab === 'inbound'" />
+        <AlertsView v-else-if="activeTab === 'alerts'" />
+        <BrowserView v-else-if="activeTab === 'browser'" />
+        <FileScanView v-else-if="activeTab === 'files'" />
+      </KeepAlive>
+    </div>
   </div>
 </template>
 
@@ -57,38 +52,20 @@ const badges = computed(() => ({ alerts: urgentCount.value }))
 
 body { background: var(--bg); color: var(--text); }
 
-.app { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
-
-.app-header {
-  height: 48px;
-  padding: 0 16px 0 80px;
+.app {
   display: flex;
-  align-items: center;
-  gap: 16px;
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-  user-select: none;
-  -webkit-app-region: drag;
+  flex-direction: row;
+  height: 100vh;
+  overflow: hidden;
 }
 
-.app-header button,
-.app-header a,
-.app-header input,
-.app-header select,
-.app-header label {
-  -webkit-app-region: no-drag;
-}
-
-.brand {
+.app-content {
+  flex: 1;
   display: flex;
-  align-items: center;
-  gap: 6px;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  color: var(--accent);
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
 }
-.brand-icon { font-size: 18px; }
 
 .https { color: var(--green) !important; }
 .warn  { color: var(--orange) !important; }
