@@ -2,9 +2,10 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import type { ThreatItem, DefenderProgress, DefenderScanResult, StoredScan } from '../types'
+import type { ThreatItem, DefenderProgress, DefenderScanResult, StoredScan, SecurityReport } from '../types'
 
 type ScanType = 'full' | 'quick' | 'custom'
+type DefenderPane = 'scanner' | 'reports'
 
 const isScanning = ref(false)
 const activeScanType = ref<ScanType | null>(null)
@@ -21,6 +22,12 @@ const neutralizeErrors = ref<Map<string, string>>(new Map())
 const storedTimestamp = ref<number | null>(null)
 const storedUnfixedCount = ref(0)
 const lastStoredResult = ref<DefenderScanResult | null>(null)
+
+// Reports pane
+const activePane = ref<DefenderPane>('scanner')
+const reports = ref<SecurityReport[]>([])
+const reportsLoading = ref(false)
+const expandedReport = ref<string | null>(null)
 
 let unlisten: UnlistenFn | null = null
 
@@ -45,6 +52,20 @@ async function persistScan() {
     result: result.value,
     neutralized: [...neutralized.value],
   }).catch(() => {})
+}
+
+async function loadReports() {
+  reportsLoading.value = true
+  try {
+    reports.value = await invoke<SecurityReport[]>('load_security_reports')
+  } catch { /* ignore */ } finally {
+    reportsLoading.value = false
+  }
+}
+
+async function switchPane(pane: DefenderPane) {
+  activePane.value = pane
+  if (pane === 'reports') await loadReports()
 }
 
 onMounted(async () => {
@@ -89,6 +110,10 @@ async function startScan(type: ScanType, paths: string[] = []) {
       storedTimestamp.value = Math.floor(Date.now() / 1000)
       storedUnfixedCount.value = result.value.threats.length
       await persistScan()
+      await invoke('save_security_report', {
+        result: result.value,
+        neutralized: [],
+      }).catch(() => {})
     }
   } catch (e) {
     error.value = typeof e === 'string' ? e : String(e)
@@ -170,6 +195,27 @@ function formatElapsed(ms: number): string {
 
 function truncate(path: string, max = 56): string {
   return path.length <= max ? path : `…${path.slice(path.length - max + 1)}`
+}
+
+function formatReportDate(unixSecs: number): string {
+  const d = new Date(unixSecs * 1000)
+  const now = new Date()
+  const diffDays = Math.floor((now.getTime() - d.getTime()) / 86400000)
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  if (diffDays === 0) return `Today, ${time}`
+  if (diffDays === 1) return `Yesterday, ${time}`
+  return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${time}`
+}
+
+function reportStatusClass(report: SecurityReport): string {
+  const active = report.result.threats.filter(t => !report.neutralized.includes(t.path)).length
+  if (active > 0) return 'status-danger'
+  if (report.result.threats.length > 0) return 'status-ok'
+  return 'status-clean'
+}
+
+function toggleReport(id: string) {
+  expandedReport.value = expandedReport.value === id ? null : id
 }
 
 onUnmounted(() => {
@@ -309,7 +355,104 @@ onUnmounted(() => {
 
     <!-- ── Idle / scan selection ── -->
     <template v-else>
-      <div class="hero">
+      <!-- Pane switcher -->
+      <div class="pane-nav">
+        <button
+          class="pane-tab"
+          :class="{ active: activePane === 'scanner' }"
+          @click="switchPane('scanner')"
+        >Scanner</button>
+        <button
+          class="pane-tab"
+          :class="{ active: activePane === 'reports' }"
+          @click="switchPane('reports')"
+        >Reports</button>
+      </div>
+
+      <!-- Reports pane -->
+      <div v-if="activePane === 'reports'" class="reports-pane">
+        <div v-if="reportsLoading" class="center-state">
+          <span class="spin-lg">↺</span>
+          <span>Loading reports…</span>
+        </div>
+        <div v-else-if="reports.length === 0" class="center-state">
+          <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="width:44px;height:44px;opacity:.35">
+            <rect x="8" y="4" width="32" height="40" rx="4"/>
+            <line x1="16" y1="16" x2="32" y2="16"/>
+            <line x1="16" y1="23" x2="32" y2="23"/>
+            <line x1="16" y1="30" x2="24" y2="30"/>
+          </svg>
+          <div style="font-size:13px;color:var(--text)">No reports yet</div>
+          <div class="state-sub">Reports are saved automatically after each scan and kept for 5 days.</div>
+        </div>
+        <div v-else class="report-list">
+          <div
+            v-for="report in reports"
+            :key="report.id"
+            class="report-card"
+            :class="{ expanded: expandedReport === report.id }"
+          >
+            <button class="report-summary" @click="toggleReport(report.id)">
+              <span :class="['report-dot', reportStatusClass(report)]"></span>
+              <span class="report-date">{{ formatReportDate(report.timestamp) }}</span>
+              <span class="report-type-badge">{{ report.result.scan_type }}</span>
+              <span class="report-stat">
+                <b>{{ report.result.scanned_files.toLocaleString() }}</b> files
+              </span>
+              <span class="sep">·</span>
+              <span class="report-stat">
+                <b
+                  :style="report.result.threats.length > 0 ? 'color:var(--red)' : ''"
+                >{{ report.result.threats.length }}</b>
+                {{ report.result.threats.length === 1 ? 'threat' : 'threats' }}
+              </span>
+              <span v-if="report.neutralized.length > 0" class="sep">·</span>
+              <span v-if="report.neutralized.length > 0" class="report-stat neutralized-stat">
+                {{ report.neutralized.length }} quarantined
+              </span>
+              <span v-if="report.result.cancelled" class="tag warn" style="margin-left:4px">stopped</span>
+              <span class="report-elapsed">{{ formatElapsed(report.result.elapsed_ms) }}</span>
+              <span class="report-chevron" :class="{ open: expandedReport === report.id }">›</span>
+            </button>
+
+            <div v-if="expandedReport === report.id" class="report-detail">
+              <div v-if="report.result.threats.length === 0" class="report-clean">
+                <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;flex-shrink:0">
+                  <circle cx="10" cy="10" r="8.5" stroke="var(--green)"/>
+                  <polyline points="6.5 10 8.5 12.5 13.5 7.5" stroke="var(--green)"/>
+                </svg>
+                <span>No threats found — system was clean.</span>
+              </div>
+              <table v-else class="report-table">
+                <thead>
+                  <tr>
+                    <th>Threat</th>
+                    <th>Type</th>
+                    <th>Severity</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="t in report.result.threats" :key="t.path" class="threat-row">
+                    <td class="threat-name">
+                      <span class="tname">{{ t.name }}</span>
+                      <span class="treason">{{ t.reason }}</span>
+                    </td>
+                    <td><span class="type-tag">{{ threatTypeLabel(t.threat_type) }}</span></td>
+                    <td><span class="sev-badge" :class="t.severity">{{ severityLabel(t.severity) }}</span></td>
+                    <td>
+                      <span v-if="report.neutralized.includes(t.path)" class="neutralized-label">Quarantined</span>
+                      <span v-else class="active-threat-label">Active</span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div v-else class="hero">
         <div class="hero-meta">
           <svg class="shield-bg" viewBox="0 0 200 220" fill="none">
             <path d="M100 8L12 42v64c0 52 37 95 88 106 51-11 88-54 88-106V42L100 8z"
@@ -366,30 +509,32 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <!-- Previous scan status bar -->
-      <div v-if="storedTimestamp && storedUnfixedCount > 0" class="issue-bar warn">
-        <svg class="issue-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="10" cy="10" r="8.5" stroke="var(--red)"/>
-          <line x1="10" y1="6" x2="10" y2="11" stroke="var(--red)"/>
-          <circle cx="10" cy="14" r="0.8" fill="var(--red)" stroke="none"/>
-        </svg>
-        <span class="issue-text">
-          <b>{{ storedUnfixedCount }} unfixed {{ storedUnfixedCount === 1 ? 'threat' : 'threats' }}</b>
-          from your last scan that could cause harm
-        </span>
-        <button
-          class="btn primary"
-          style="margin-left: auto; flex-shrink: 0"
-          @click="result = lastStoredResult"
-        >Check now</button>
-      </div>
-      <div v-else-if="storedTimestamp && storedUnfixedCount === 0" class="issue-bar clean">
-        <svg class="issue-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="10" cy="10" r="8.5" stroke="var(--green)"/>
-          <polyline points="6.5 10 8.5 12.5 13.5 7.5" stroke="var(--green)"/>
-        </svg>
-        <span class="issue-text">Last scan was clean — {{ daysAgo(storedTimestamp) }}</span>
-      </div>
+      <!-- Previous scan status bar (scanner pane only) -->
+      <template v-if="activePane === 'scanner'">
+        <div v-if="storedTimestamp && storedUnfixedCount > 0" class="issue-bar warn">
+          <svg class="issue-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="10" cy="10" r="8.5" stroke="var(--red)"/>
+            <line x1="10" y1="6" x2="10" y2="11" stroke="var(--red)"/>
+            <circle cx="10" cy="14" r="0.8" fill="var(--red)" stroke="none"/>
+          </svg>
+          <span class="issue-text">
+            <b>{{ storedUnfixedCount }} unfixed {{ storedUnfixedCount === 1 ? 'threat' : 'threats' }}</b>
+            from your last scan that could cause harm
+          </span>
+          <button
+            class="btn primary"
+            style="margin-left: auto; flex-shrink: 0"
+            @click="result = lastStoredResult"
+          >Check now</button>
+        </div>
+        <div v-else-if="storedTimestamp && storedUnfixedCount === 0" class="issue-bar clean">
+          <svg class="issue-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="10" cy="10" r="8.5" stroke="var(--green)"/>
+            <polyline points="6.5 10 8.5 12.5 13.5 7.5" stroke="var(--green)"/>
+          </svg>
+          <span class="issue-text">Last scan was clean — {{ daysAgo(storedTimestamp) }}</span>
+        </div>
+      </template>
     </template>
 
     <!-- ── Custom path dialog ── -->
@@ -831,4 +976,163 @@ td {
 }
 
 .mono { font-family: 'SF Mono', 'Menlo', monospace; }
+
+/* ── Pane nav ── */
+.pane-nav {
+  display: flex;
+  gap: 2px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  flex-shrink: 0;
+}
+
+.pane-tab {
+  padding: 5px 14px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.pane-tab:hover { background: var(--surface-2); color: var(--text); }
+.pane-tab.active { background: var(--surface-2); color: var(--text); }
+
+/* ── Reports pane ── */
+.reports-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.report-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.report-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  transition: border-color 0.15s;
+}
+.report-card:hover { border-color: rgba(88, 166, 255, 0.3); }
+.report-card.expanded { border-color: rgba(88, 166, 255, 0.4); }
+
+.report-summary {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  background: transparent;
+  border: none;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+.report-summary:hover { background: var(--surface-2); }
+
+.report-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.report-dot.status-clean { background: var(--green); }
+.report-dot.status-ok { background: var(--orange); }
+.report-dot.status-danger { background: var(--red); }
+
+.report-date {
+  font-weight: 500;
+  color: var(--text);
+  min-width: 140px;
+}
+
+.report-type-badge {
+  text-transform: capitalize;
+  font-size: 10px;
+  font-weight: 500;
+  background: rgba(88, 166, 255, 0.10);
+  color: var(--accent);
+  border: 1px solid rgba(88, 166, 255, 0.2);
+  padding: 1px 7px;
+  border-radius: 8px;
+}
+
+.report-stat { color: var(--muted); }
+.report-stat b { color: var(--text); font-variant-numeric: tabular-nums; }
+
+.neutralized-stat { color: var(--green); }
+
+.report-elapsed {
+  margin-left: auto;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.report-chevron {
+  font-size: 16px;
+  color: var(--muted);
+  transition: transform 0.15s;
+  line-height: 1;
+  margin-left: 4px;
+}
+.report-chevron.open { transform: rotate(90deg); }
+
+.report-detail {
+  border-top: 1px solid var(--border);
+  background: var(--surface-2);
+}
+
+.report-clean {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  font-size: 12px;
+  color: var(--green);
+}
+
+.report-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.report-table th {
+  padding: 7px 14px;
+  text-align: left;
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  position: static;
+}
+.report-table td {
+  padding: 8px 14px;
+  border-bottom: 1px solid rgba(48, 54, 61, 0.4);
+  vertical-align: middle;
+}
+.report-table tr:last-child td { border-bottom: none; }
+
+.active-threat-label {
+  font-size: 11px;
+  color: var(--red);
+  font-weight: 500;
+}
 </style>

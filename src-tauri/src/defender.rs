@@ -15,10 +15,105 @@ pub struct StoredScan {
     pub neutralized: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecurityReport {
+    pub id: String,
+    pub timestamp: u64,
+    pub result: DefenderScanResult,
+    pub neutralized: Vec<String>,
+}
+
 fn store_path() -> PathBuf {
     home_dir()
         .join(".netscope")
         .join("defender_last_scan.json")
+}
+
+fn reports_dir() -> PathBuf {
+    home_dir().join(".netscope").join("reports")
+}
+
+const REPORT_MAX_AGE_SECS: u64 = 5 * 24 * 60 * 60;
+
+fn prune_old_reports(dir: &PathBuf, now_secs: u64) {
+    let cutoff = now_secs.saturating_sub(REPORT_MAX_AGE_SECS);
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if let Ok(ts) = stem.parse::<u64>() {
+                if ts < cutoff {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn save_security_report(
+    result: DefenderScanResult,
+    neutralized: Vec<String>,
+) -> Result<(), String> {
+    let dir = reports_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let id = ts.to_string();
+    let report = SecurityReport { id: id.clone(), timestamp: ts, result, neutralized };
+    let json = serde_json::to_string(&report).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join(format!("{}.json", id)), json).map_err(|e| e.to_string())?;
+
+    prune_old_reports(&dir, ts);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn load_security_reports() -> Result<Vec<SecurityReport>, String> {
+    let dir = reports_dir();
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let cutoff = now.saturating_sub(REPORT_MAX_AGE_SECS);
+
+    let entries = std::fs::read_dir(&dir).map_err(|e| e.to_string())?;
+    let mut reports: Vec<SecurityReport> = Vec::new();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let ts: u64 = match stem.parse() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if ts < cutoff {
+            let _ = std::fs::remove_file(&path);
+            continue;
+        }
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Ok(report) = serde_json::from_str::<SecurityReport>(&content) {
+                reports.push(report);
+            }
+        }
+    }
+
+    reports.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    Ok(reports)
 }
 
 #[tauri::command]

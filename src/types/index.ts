@@ -217,6 +217,13 @@ export interface StoredScan {
   neutralized: string[]
 }
 
+export interface SecurityReport {
+  id: string
+  timestamp: number
+  result: DefenderScanResult
+  neutralized: string[]
+}
+
 export const PORT_LABELS: Record<number, string> = {
   21: 'FTP',
   22: 'SSH',
