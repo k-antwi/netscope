@@ -1,5 +1,5 @@
 <script setup lang="ts">
-export type TabKey = 'dashboard' | 'outbound' | 'inbound' | 'alerts' | 'browser' | 'files'
+export type TabKey = 'dashboard' | 'outbound' | 'inbound' | 'alerts' | 'browser' | 'files' | 'defender'
 
 defineProps<{
   activeTab: TabKey
@@ -15,6 +15,7 @@ const tabs: { key: TabKey; label: string }[] = [
   { key: 'alerts',   label: 'Alerts' },
   { key: 'browser',  label: 'Browser' },
   { key: 'files',    label: 'File Scan' },
+  { key: 'defender', label: 'Defender' },
 ]
 </script>
 
@@ -94,6 +95,12 @@ const tabs: { key: TabKey; label: string }[] = [
           <polyline points="14 2 14 8 20 8" />
           <circle cx="10" cy="14" r="2" />
           <path d="m12.5 16.5 1.5 1.5" />
+        </svg>
+
+        <!-- Defender -->
+        <svg v-else-if="tab.key === 'defender'" class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 2L3 7v5c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V7l-9-5z" />
+          <polyline points="9 12 11 14 15 10" />
         </svg>
 
         <span class="nav-label">{{ tab.label }}</span>

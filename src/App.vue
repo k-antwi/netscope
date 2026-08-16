@@ -7,6 +7,7 @@ import InboundView from './views/InboundView.vue'
 import AlertsView from './views/AlertsView.vue'
 import BrowserView from './views/BrowserView.vue'
 import FileScanView from './views/FileScanView.vue'
+import DefenderView from './views/DefenderView.vue'
 import { useAlerts } from './composables/useAlerts'
 import type { TabKey } from './components/AppTabs.vue'
 
@@ -26,6 +27,7 @@ const badges = computed(() => ({ alerts: urgentCount.value }))
         <AlertsView v-else-if="activeTab === 'alerts'" />
         <BrowserView v-else-if="activeTab === 'browser'" />
         <FileScanView v-else-if="activeTab === 'files'" />
+        <DefenderView v-else-if="activeTab === 'defender'" />
       </KeepAlive>
     </div>
   </div>

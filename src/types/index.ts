@@ -187,6 +187,30 @@ export interface SystemMetrics {
   net_out_bytes: number
 }
 
+export interface ThreatItem {
+  path: string
+  name: string
+  threat_type: string
+  severity: string
+  reason: string
+  size: number
+  modified: number | null
+}
+
+export interface DefenderProgress {
+  scanned_files: number
+  threats_found: number
+  current: string
+}
+
+export interface DefenderScanResult {
+  threats: ThreatItem[]
+  scanned_files: number
+  elapsed_ms: number
+  scan_type: string
+  cancelled: boolean
+}
+
 export const PORT_LABELS: Record<number, string> = {
   21: 'FTP',
   22: 'SSH',
