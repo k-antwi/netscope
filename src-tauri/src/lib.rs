@@ -673,6 +673,94 @@ pub struct BrowserRequest {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SystemMetrics {
+    pub cpu_percent: f32,
+    pub memory_used_gb: f32,
+    pub memory_total_gb: f32,
+    pub net_in_bytes: f64,
+    pub net_out_bytes: f64,
+}
+
+#[tauri::command]
+async fn get_system_metrics() -> SystemMetrics {
+    // CPU: top -l 2 -s 1 gives two samples 1s apart; shell_async runs it in a blocking thread
+    let cpu_out = shell_async("top -l 2 -s 1 -n 0 2>/dev/null".to_string()).await;
+    let cpu_percent = cpu_out
+        .lines()
+        .filter(|l| l.contains("CPU usage"))
+        .last()
+        .and_then(|l| {
+            l.split(',')
+                .find(|p| p.contains("idle"))
+                .and_then(|p| p.trim().split('%').next())
+                .and_then(|s| s.trim().parse::<f32>().ok())
+        })
+        .map(|idle| (100.0_f32 - idle).max(0.0).min(100.0))
+        .unwrap_or(0.0);
+
+    // Memory: vm_stat + sysctl hw.memsize
+    let total_bytes: u64 = Command::new("sysctl")
+        .args(["-n", "hw.memsize"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0);
+
+    let vm_out = Command::new("vm_stat")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default();
+
+    let page_size: u64 = vm_out
+        .lines()
+        .find(|l| l.contains("page size of"))
+        .and_then(|l| {
+            let s = l.find("page size of ")? + 13;
+            l[s..].split_whitespace().next()?.parse().ok()
+        })
+        .unwrap_or(4096);
+
+    let parse_vm = |key: &str| -> u64 {
+        vm_out
+            .lines()
+            .find(|l| l.trim_start().starts_with(key))
+            .and_then(|l| l.splitn(2, ':').nth(1))
+            .and_then(|s| s.trim().trim_end_matches('.').parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+
+    let used_pages = parse_vm("Pages active")
+        + parse_vm("Pages wired down")
+        + parse_vm("Pages occupied by compressor");
+
+    let memory_used_gb = (used_pages * page_size) as f32 / (1024.0 * 1024.0 * 1024.0);
+    let memory_total_gb = total_bytes as f32 / (1024.0 * 1024.0 * 1024.0);
+
+    // Network: netstat -ib cumulative bytes per physical interface
+    let net_out_raw = Command::new("netstat")
+        .args(["-ib"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default();
+
+    let mut net_in_bytes: f64 = 0.0;
+    let mut net_out_bytes: f64 = 0.0;
+    for line in net_out_raw.lines().skip(1) {
+        let p: Vec<&str> = line.split_whitespace().collect();
+        if p.len() < 10 { continue; }
+        if !p[0].starts_with("en") { continue; }
+        if !p[2].starts_with('<') { continue; } // Only <Link#N> rows, avoid per-protocol duplicates
+        net_in_bytes += p[6].parse::<f64>().unwrap_or(0.0);
+        net_out_bytes += p[9].parse::<f64>().unwrap_or(0.0);
+    }
+
+    SystemMetrics { cpu_percent, memory_used_gb, memory_total_gb, net_in_bytes, net_out_bytes }
+}
+
 async fn start_ws_server(app_handle: tauri::AppHandle) {
     let listener = match tokio::net::TcpListener::bind("127.0.0.1:9922").await {
         Ok(l) => l,
@@ -715,7 +803,7 @@ pub fn run() {
             tauri::async_runtime::spawn(start_ws_server(handle));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_connections, investigate_ip, get_inbound, investigate_service, get_issues, scan_files, cancel_file_scan, delete_files, get_file_details, reveal_in_finder, check_malware, check_cves])
+        .invoke_handler(tauri::generate_handler![get_connections, investigate_ip, get_inbound, investigate_service, get_issues, get_system_metrics, scan_files, cancel_file_scan, delete_files, get_file_details, reveal_in_finder, check_malware, check_cves])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

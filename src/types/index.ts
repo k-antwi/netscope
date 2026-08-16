@@ -179,6 +179,14 @@ export interface BrowserRequest {
   error: string | null
 }
 
+export interface SystemMetrics {
+  cpu_percent: number
+  memory_used_gb: number
+  memory_total_gb: number
+  net_in_bytes: number
+  net_out_bytes: number
+}
+
 export const PORT_LABELS: Record<number, string> = {
   21: 'FTP',
   22: 'SSH',

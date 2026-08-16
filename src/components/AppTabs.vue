@@ -1,5 +1,5 @@
 <script setup lang="ts">
-export type TabKey = 'outbound' | 'inbound' | 'alerts' | 'browser' | 'files'
+export type TabKey = 'dashboard' | 'outbound' | 'inbound' | 'alerts' | 'browser' | 'files'
 
 defineProps<{
   activeTab: TabKey
@@ -9,6 +9,7 @@ defineProps<{
 defineEmits<{ change: [tab: TabKey] }>()
 
 const tabs: { key: TabKey; label: string }[] = [
+  { key: 'dashboard', label: 'Dashboard' },
   { key: 'outbound', label: 'Outbound' },
   { key: 'inbound',  label: 'Inbound' },
   { key: 'alerts',   label: 'Alerts' },
@@ -46,8 +47,16 @@ const tabs: { key: TabKey; label: string }[] = [
         :class="{ active: activeTab === tab.key }"
         @click="$emit('change', tab.key)"
       >
+        <!-- Dashboard -->
+        <svg v-if="tab.key === 'dashboard'" class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="7" height="7" rx="1"/>
+          <rect x="14" y="3" width="7" height="7" rx="1"/>
+          <rect x="3" y="14" width="7" height="7" rx="1"/>
+          <rect x="14" y="14" width="7" height="7" rx="1"/>
+        </svg>
+
         <!-- Outbound -->
-        <svg v-if="tab.key === 'outbound'" class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <svg v-else-if="tab.key === 'outbound'" class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
           <path d="M7 17L17 7" />
           <path d="M17 7H10" />
           <path d="M17 7v7" />

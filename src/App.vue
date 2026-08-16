@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import AppTabs from './components/AppTabs.vue'
+import DashboardView from './views/DashboardView.vue'
 import OutboundView from './views/OutboundView.vue'
 import InboundView from './views/InboundView.vue'
 import AlertsView from './views/AlertsView.vue'
@@ -9,7 +10,7 @@ import FileScanView from './views/FileScanView.vue'
 import { useAlerts } from './composables/useAlerts'
 import type { TabKey } from './components/AppTabs.vue'
 
-const activeTab = ref<TabKey>('outbound')
+const activeTab = ref<TabKey>('dashboard')
 const { urgentCount } = useAlerts()
 const badges = computed(() => ({ alerts: urgentCount.value }))
 </script>
@@ -19,7 +20,8 @@ const badges = computed(() => ({ alerts: urgentCount.value }))
     <AppTabs :active-tab="activeTab" :badges="badges" @change="activeTab = $event" />
     <div class="app-content">
       <KeepAlive>
-        <OutboundView v-if="activeTab === 'outbound'" />
+        <DashboardView v-if="activeTab === 'dashboard'" />
+        <OutboundView v-else-if="activeTab === 'outbound'" />
         <InboundView v-else-if="activeTab === 'inbound'" />
         <AlertsView v-else-if="activeTab === 'alerts'" />
         <BrowserView v-else-if="activeTab === 'browser'" />
