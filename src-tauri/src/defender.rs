@@ -6,6 +6,50 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, State};
 
+// ── Persistence ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredScan {
+    pub timestamp: u64,
+    pub result: DefenderScanResult,
+    pub neutralized: Vec<String>,
+}
+
+fn store_path() -> PathBuf {
+    home_dir()
+        .join(".netscope")
+        .join("defender_last_scan.json")
+}
+
+#[tauri::command]
+pub async fn save_defender_scan(
+    result: DefenderScanResult,
+    neutralized: Vec<String>,
+) -> Result<(), String> {
+    let dir = home_dir().join(".netscope");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let stored = StoredScan { timestamp: ts, result, neutralized };
+    let json = serde_json::to_string(&stored).map_err(|e| e.to_string())?;
+    std::fs::write(store_path(), json).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn load_last_defender_scan() -> Result<Option<StoredScan>, String> {
+    let path = store_path();
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let stored: StoredScan = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    Ok(Some(stored))
+}
+
 #[derive(Debug, Default)]
 pub struct DefenderState {
     pub cancel: Arc<AtomicBool>,

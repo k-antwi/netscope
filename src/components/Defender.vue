@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { ref, computed, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import type { ThreatItem, DefenderProgress, DefenderScanResult } from '../types'
+import type { ThreatItem, DefenderProgress, DefenderScanResult, StoredScan } from '../types'
 
 type ScanType = 'full' | 'quick' | 'custom'
 
@@ -17,19 +17,50 @@ const neutralizing = ref<Set<string>>(new Set())
 const neutralized = ref<Set<string>>(new Set())
 const neutralizeErrors = ref<Map<string, string>>(new Map())
 
+// Persistence — survives tab switches AND app restarts
+const storedTimestamp = ref<number | null>(null)
+const storedUnfixedCount = ref(0)
+const lastStoredResult = ref<DefenderScanResult | null>(null)
+
 let unlisten: UnlistenFn | null = null
 
 const threats = computed(() => result.value?.threats ?? [])
 const activeThreats = computed(() => threats.value.filter(t => !neutralized.value.has(t.path)))
 
-function lastScanText(): string {
-  if (!result.value) return 'Never scanned'
-  const s = result.value.scanned_files.toLocaleString()
-  const t = result.value.threats.length
-  const elapsed = formatElapsed(result.value.elapsed_ms)
-  const label = result.value.scan_type === 'full' ? 'Full' : result.value.scan_type === 'quick' ? 'Quick' : 'Custom'
-  return `${label} scan · ${s} files · ${t} threat${t === 1 ? '' : 's'} · ${elapsed}`
+function daysAgo(unixSecs: number): string {
+  const days = Math.floor((Date.now() / 1000 - unixSecs) / 86400)
+  if (days === 0) return 'today'
+  if (days === 1) return '1 day ago'
+  return `${days} days ago`
 }
+
+function lastScanText(): string {
+  if (!storedTimestamp.value) return 'Never scanned'
+  return `Last scanned ${daysAgo(storedTimestamp.value)}`
+}
+
+async function persistScan() {
+  if (!result.value) return
+  await invoke('save_defender_scan', {
+    result: result.value,
+    neutralized: [...neutralized.value],
+  }).catch(() => {})
+}
+
+onMounted(async () => {
+  try {
+    const stored = await invoke<StoredScan | null>('load_last_defender_scan')
+    if (stored) {
+      result.value = stored.result
+      lastStoredResult.value = stored.result
+      neutralized.value = new Set(stored.neutralized)
+      storedTimestamp.value = stored.timestamp
+      storedUnfixedCount.value = stored.result.threats.filter(
+        (t: ThreatItem) => !stored.neutralized.includes(t.path)
+      ).length
+    }
+  } catch { /* first launch or corrupted file — silently ignore */ }
+})
 
 async function startScan(type: ScanType, paths: string[] = []) {
   if (isScanning.value) return
@@ -53,6 +84,12 @@ async function startScan(type: ScanType, paths: string[] = []) {
       scanType: type,
       customPaths: paths,
     })
+    if (result.value) {
+      lastStoredResult.value = result.value
+      storedTimestamp.value = Math.floor(Date.now() / 1000)
+      storedUnfixedCount.value = result.value.threats.length
+      await persistScan()
+    }
   } catch (e) {
     error.value = typeof e === 'string' ? e : String(e)
   } finally {
@@ -92,6 +129,8 @@ async function neutralize(threat: ThreatItem) {
     const errs = new Map(neutralizeErrors.value)
     errs.delete(threat.path)
     neutralizeErrors.value = errs
+    storedUnfixedCount.value = Math.max(0, storedUnfixedCount.value - 1)
+    await persistScan()
   } catch (e) {
     const errs = new Map(neutralizeErrors.value)
     errs.set(threat.path, typeof e === 'string' ? e : String(e))
@@ -327,9 +366,29 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <!-- Previous result status bar -->
-      <div v-if="result === null && false" class="issue-bar">
-        <!-- placeholder for re-attaching last result without full re-render -->
+      <!-- Previous scan status bar -->
+      <div v-if="storedTimestamp && storedUnfixedCount > 0" class="issue-bar warn">
+        <svg class="issue-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="10" cy="10" r="8.5" stroke="var(--red)"/>
+          <line x1="10" y1="6" x2="10" y2="11" stroke="var(--red)"/>
+          <circle cx="10" cy="14" r="0.8" fill="var(--red)" stroke="none"/>
+        </svg>
+        <span class="issue-text">
+          <b>{{ storedUnfixedCount }} unfixed {{ storedUnfixedCount === 1 ? 'threat' : 'threats' }}</b>
+          from your last scan that could cause harm
+        </span>
+        <button
+          class="btn primary"
+          style="margin-left: auto; flex-shrink: 0"
+          @click="result = lastStoredResult"
+        >Check now</button>
+      </div>
+      <div v-else-if="storedTimestamp && storedUnfixedCount === 0" class="issue-bar clean">
+        <svg class="issue-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="10" cy="10" r="8.5" stroke="var(--green)"/>
+          <polyline points="6.5 10 8.5 12.5 13.5 7.5" stroke="var(--green)"/>
+        </svg>
+        <span class="issue-text">Last scan was clean — {{ daysAgo(storedTimestamp) }}</span>
       </div>
     </template>
 
@@ -689,6 +748,29 @@ td {
 }
 .btn.danger:hover { filter: brightness(1.1); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ── Issue status bar ── */
+.issue-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 24px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+  font-size: 13px;
+}
+.issue-bar.warn {
+  background: rgba(248, 81, 73, 0.06);
+  border-top-color: rgba(248, 81, 73, 0.2);
+}
+.issue-bar.clean {
+  background: rgba(63, 185, 80, 0.05);
+  border-top-color: rgba(63, 185, 80, 0.15);
+  color: var(--muted);
+}
+.issue-icon { width: 20px; height: 20px; flex-shrink: 0; }
+.issue-text { color: var(--text); }
+.issue-text b { font-weight: 600; }
 
 /* ── Modal ── */
 .modal-overlay {

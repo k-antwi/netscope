@@ -211,6 +211,12 @@ export interface DefenderScanResult {
   cancelled: boolean
 }
 
+export interface StoredScan {
+  timestamp: number
+  result: DefenderScanResult
+  neutralized: string[]
+}
+
 export const PORT_LABELS: Record<number, string> = {
   21: 'FTP',
   22: 'SSH',
