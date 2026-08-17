@@ -177,7 +177,7 @@ const tabs: { key: TabKey; label: string }[] = [
   flex-direction: column;
   gap: 2px;
   padding: 4px 8px;
-  overflow-y: auto;
+  overflow: hidden;
 }
 
 .nav-item {
