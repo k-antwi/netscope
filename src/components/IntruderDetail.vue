@@ -17,6 +17,90 @@ watch(() => props.finding.id, () => {
   killError.value = ''
 })
 
+// ── Action execution modal ───────────────────────────────────────────────────
+
+interface ExecResult { stdout: string; stderr: string; success: boolean }
+
+const execOpen    = ref(false)
+const execLabel   = ref('')
+const execCmd     = ref('')
+const execRunning = ref(false)
+const execResult  = ref<ExecResult | null>(null)
+
+function execSummary(label: string, r: ExecResult): string {
+  const out = (r.stdout + r.stderr).trim()
+  const lines = out ? out.split('\n').filter(l => l.trim()).length : 0
+  const l = label.toLowerCase()
+
+  if (l.includes('kill') || l.includes('terminat')) {
+    return r.success
+      ? `Process ${props.finding.pid} (${props.finding.process}) has been terminated. The binary on disk has not been removed — run a Defender scan to fully clean up.`
+      : `Could not terminate the process. It may have already exited, or you need elevated privileges.`
+  }
+  if (l.includes('preserve')) {
+    return out.includes('Done') || r.success
+      ? `Binary copied to your Desktop. You can now inspect it forensically without risk of self-deletion.`
+      : `Could not preserve the binary — the process may have already exited or deleted its own binary.`
+  }
+  if (l.includes('launchagent') || l.includes('persistence')) {
+    return lines > 0
+      ? `${lines} item(s) in LaunchAgent directories above. Look for entries referencing "${props.finding.process}" or unfamiliar paths.`
+      : `No LaunchAgent entries found. This process likely has not installed persistence here.`
+  }
+  if (l.includes('connect') || l.includes('audit') || l.includes('lsof')) {
+    return lines > 1
+      ? `${lines - 1} connection(s) found. Review the remote hosts and ports above to map the C2 infrastructure.`
+      : `No active connections found. The process may have already exited or severed its connections.`
+  }
+  if (l.includes('block') || l.includes('firewall')) {
+    return r.success
+      ? `Firewall rule applied. Traffic to the specified destination is now blocked at the packet-filter level.`
+      : `The pf rule could not be applied — run this command manually in Terminal with sudo privileges.`
+  }
+  if (l.includes('isolate') || l.includes('wifi')) {
+    return r.success
+      ? `WiFi has been disabled. This machine is now isolated from the wireless network. Ethernet connections are unaffected.`
+      : `Could not disable WiFi automatically. Disable it manually via System Settings → Wi-Fi.`
+  }
+  if (l.includes('inspect') || l.includes('signature')) {
+    return r.success
+      ? `Binary analysis complete. Check whether the code signature is valid and whether the path matches a known application.`
+      : `Binary inspection failed — the process may have exited or the binary is no longer on disk.`
+  }
+  if (!r.success) {
+    return `Command exited with an error. Commands modifying firewall rules require sudo — run them manually in Terminal.`
+  }
+  return lines > 0
+    ? `Command completed. ${lines} line(s) of output — review the results above.`
+    : `Command completed with no output.`
+}
+
+async function executeAction(label: string, cmd: string, isKill = false) {
+  execLabel.value   = label
+  execCmd.value     = isKill ? `kill -9 ${props.finding.pid}` : cmd
+  execResult.value  = null
+  execRunning.value = true
+  execOpen.value    = true
+
+  try {
+    if (isKill) {
+      await invoke('kill_process', { pid: props.finding.pid })
+      killed.value = true
+      execResult.value = { stdout: `Process ${props.finding.pid} terminated.`, stderr: '', success: true }
+    } else {
+      execResult.value = await invoke<ExecResult>('run_command', { cmd })
+    }
+  } catch (e) {
+    execResult.value = { stdout: '', stderr: typeof e === 'string' ? e : String(e), success: false }
+  } finally {
+    execRunning.value = false
+  }
+}
+
+function closeExec() {
+  execOpen.value = false
+}
+
 // ── Encryption assessment ────────────────────────────────────────────────────
 
 const ENCRYPTED_PORTS = new Set([443, 8443, 465, 587, 993, 995, 636, 989, 990, 5061])
@@ -62,7 +146,7 @@ const encStatus = computed(() => {
 
 // ── Per-category impact & action data ────────────────────────────────────────
 
-interface Action  { label: string; desc: string }
+interface Action  { label: string; desc: string; cmd?: string; isKill?: boolean }
 interface Command { label: string; cmd: string }
 interface Detail  { impacts: string[]; actions: Action[]; commands: Command[] }
 
@@ -83,9 +167,9 @@ function buildDetail(f: IntruderFinding): Detail {
           'Any credential typed since the process started should be considered compromised',
         ],
         actions: [
-          { label: 'Kill the process immediately',        desc: 'Severing the connection is the first priority. Terminating the process cuts the attacker\'s access but does not remove the malware binary from disk.' },
-          { label: 'Block the remote IP at the firewall', desc: 'Prevent reconnection even if the malware restarts. Use pf (macOS packet filter) to drop all traffic to the remote host.' },
-          { label: 'Audit LaunchAgents for persistence',  desc: 'Malware typically installs a LaunchAgent or LaunchDaemon entry so it restarts on login or reboot. Check both user and system directories.' },
+          { label: 'Kill the process immediately',        desc: 'Severing the connection is the first priority. Terminating the process cuts the attacker\'s access but does not remove the malware binary from disk.', isKill: true },
+          { label: 'Block the remote IP at the firewall', desc: 'Prevent reconnection even if the malware restarts. Use pf (macOS packet filter) to drop all traffic to the remote host.', cmd: ip ? `echo 'block drop out quick proto tcp from any to ${ip}' | sudo pfctl -ef -` : undefined },
+          { label: 'Audit LaunchAgents for persistence',  desc: 'Malware typically installs a LaunchAgent or LaunchDaemon entry so it restarts on login or reboot. Check both user and system directories.', cmd: `ls -la ~/Library/LaunchAgents/ /Library/LaunchAgents/ /Library/LaunchDaemons/ 2>&1` },
           { label: 'Run a full Defender scan',            desc: 'Use the Scanner pane to locate and quarantine the malware binary and any dropped payloads.' },
           { label: 'Rotate all credentials',              desc: 'Assume every password, API key, and SSH key accessible from this account since the infection time is compromised.' },
         ],
@@ -108,11 +192,11 @@ function buildDetail(f: IntruderFinding): Detail {
           'A process from ~/Downloads making outbound connections is a strong malware indicator',
         ],
         actions: [
-          { label: 'Kill the process',              desc: 'Stop any ongoing exfiltration or command execution immediately.' },
-          { label: 'Preserve the binary',           desc: 'Copy the executable to a safe location before it can self-delete — you\'ll need it for forensic analysis.' },
-          { label: 'Audit what it\'s connecting to', desc: 'Use lsof to reveal all remote hosts. This exposes the C2 infrastructure and helps blocklist it.' },
-          { label: 'Inspect the binary',            desc: 'Use codesign and file to check whether it is a signed Apple binary, an unsigned app, or a raw executable.' },
-          { label: 'Check LaunchAgents',            desc: 'The process may have installed a LaunchAgent to restart on login. Search for entries pointing to the binary\'s original location.' },
+          { label: 'Kill the process',              desc: 'Stop any ongoing exfiltration or command execution immediately.', isKill: true },
+          { label: 'Preserve the binary',           desc: 'Copy the executable to a safe location before it can self-delete — you\'ll need it for forensic analysis.', cmd: `cp "$(ps -p ${pid} -o args= | awk '{print $1}')" ~/Desktop/preserved_$(date +%s) 2>/dev/null && echo Done` },
+          { label: 'Audit what it\'s connecting to', desc: 'Use lsof to reveal all remote hosts. This exposes the C2 infrastructure and helps blocklist it.', cmd: `lsof -p ${pid} -i 2>&1` },
+          { label: 'Inspect the binary',            desc: 'Use codesign and file to check whether it is a signed Apple binary, an unsigned app, or a raw executable.', cmd: `file "$(ps -p ${pid} -o args= | awk '{print $1}')" 2>&1 && codesign -dv --verbose=2 "$(ps -p ${pid} -o args= | awk '{print $1}')" 2>&1` },
+          { label: 'Check LaunchAgents',            desc: 'The process may have installed a LaunchAgent to restart on login. Search for entries pointing to the binary\'s original location.', cmd: `ls -la ~/Library/LaunchAgents/ /Library/LaunchAgents/ /Library/LaunchDaemons/ 2>&1` },
         ],
         commands: [
           { label: 'Full process path',             cmd: `ps -p ${pid} -o args=` },
@@ -133,10 +217,10 @@ function buildDetail(f: IntruderFinding): Detail {
           'Internal services (databases, file shares, internal APIs) that trust this machine\'s IP are now exposed',
         ],
         actions: [
-          { label: 'Isolate this machine from the network', desc: 'Disable WiFi and unplug Ethernet immediately to cut off lateral spread before other hosts are compromised.' },
-          { label: 'Kill the process',                       desc: 'Terminate after network isolation to prevent final communication back to the attacker.' },
+          { label: 'Isolate this machine from the network', desc: 'Disable WiFi and unplug Ethernet immediately to cut off lateral spread before other hosts are compromised.', cmd: `networksetup -setairportpower en0 off && echo WiFi disabled` },
+          { label: 'Kill the process',                       desc: 'Terminate after network isolation to prevent final communication back to the attacker.', isKill: true },
           { label: 'Alert your network administrator',       desc: 'Other devices must be audited for signs of compromise immediately. Share this machine\'s IP and the time of first activity.' },
-          { label: 'Audit all LAN-connected devices',        desc: 'Check router DHCP logs and firewall logs for unusual connection attempts originating from this machine\'s IP address.' },
+          { label: 'Audit all LAN-connected devices',        desc: 'Check router DHCP logs and firewall logs for unusual connection attempts originating from this machine\'s IP address.', cmd: `arp -a 2>&1` },
           { label: 'Rotate network credentials from a clean device', desc: 'WiFi passwords, admin accounts, and shared credentials should all be changed from a separate, uncompromised machine.' },
         ],
         commands: [
@@ -158,10 +242,10 @@ function buildDetail(f: IntruderFinding): Detail {
           'If the process is a worm, it may be actively trying to infect other machines',
         ],
         actions: [
-          { label: 'Kill the process',                      desc: 'Stop the scanning activity immediately.' },
+          { label: 'Kill the process',                      desc: 'Stop the scanning activity immediately.', isKill: true },
           { label: 'Block all outbound traffic from this process', desc: 'Use the macOS Application Firewall or pf to prevent the process from making further outbound connections even if it restarts.' },
-          { label: 'Identify and verify the binary',        desc: 'Determine if this is a security tool you installed intentionally. If not, it is malware.' },
-          { label: 'Check who launched it',                 desc: 'The parent process may reveal how the scanner was deployed — via a browser, script, or another malicious process.' },
+          { label: 'Identify and verify the binary',        desc: 'Determine if this is a security tool you installed intentionally. If not, it is malware.', cmd: `codesign -dv "$(ps -p ${pid} -o args= | awk '{print $1}')" 2>&1 && file "$(ps -p ${pid} -o args= | awk '{print $1}')" 2>&1` },
+          { label: 'Check who launched it',                 desc: 'The parent process may reveal how the scanner was deployed — via a browser, script, or another malicious process.', cmd: `ps -p $(ps -p ${pid} -o ppid= | tr -d ' ') -o user,pid,args 2>&1` },
           { label: 'Run a full Defender scan',              desc: 'Port scanners are often deployed as part of larger malware packages.' },
         ],
         commands: [
@@ -182,10 +266,10 @@ function buildDetail(f: IntruderFinding): Detail {
           'Unauthorized listeners are a persistent backdoor that survives process restarts if paired with LaunchAgents',
         ],
         actions: [
-          { label: 'Kill the listener process',            desc: 'Terminate the process to close the port immediately.' },
-          { label: 'Block the port at the network layer',  desc: 'Even if the process restarts, a pf rule will prevent inbound connections to this port.' },
-          { label: 'Audit who has already connected',      desc: 'Use lsof to check for ESTABLISHED inbound sessions — the attacker may already be inside.' },
-          { label: 'Check for persistence',                desc: 'Search LaunchAgents and LaunchDaemons for entries that restart this listener automatically.' },
+          { label: 'Kill the listener process',            desc: 'Terminate the process to close the port immediately.', isKill: true },
+          { label: 'Block the port at the network layer',  desc: 'Even if the process restarts, a pf rule will prevent inbound connections to this port.', cmd: port ? `echo 'block drop in quick proto tcp from any to any port ${port}' | sudo pfctl -ef -` : undefined },
+          { label: 'Audit who has already connected',      desc: 'Use lsof to check for ESTABLISHED inbound sessions — the attacker may already be inside.', cmd: port ? `lsof -i :${port} -n -P 2>&1 | grep ESTABLISHED` : undefined },
+          { label: 'Check for persistence',                desc: 'Search LaunchAgents and LaunchDaemons for entries that restart this listener automatically.', cmd: `grep -rl "${f.process}" ~/Library/LaunchAgents/ /Library/LaunchAgents/ /Library/LaunchDaemons/ 2>/dev/null || echo "No persistence entries found"` },
           { label: 'Rotate credentials',                   desc: 'If any inbound connection was established before discovery, assume all credentials on this machine are compromised.' },
         ],
         commands: [
@@ -206,11 +290,11 @@ function buildDetail(f: IntruderFinding): Detail {
           ip ? `Files and credentials are being sent to ${ip} — the operator of that host has full access` : 'The remote host operator has visibility into all transferred content',
         ],
         actions: [
-          { label: 'Kill the process',                            desc: 'Stop the cleartext transmission immediately.' },
+          { label: 'Kill the process',                            desc: 'Stop the cleartext transmission immediately.', isKill: true },
           { label: 'Replace FTP/Telnet with encrypted alternatives', desc: 'Use SFTP (part of OpenSSH) or SCP instead of FTP. Use SSH instead of Telnet. Most servers support these today.' },
-          { label: 'Audit what was transferred',                  desc: 'Review transfer logs on both the client and server side to understand what data was exposed.' },
+          { label: 'Audit what was transferred',                  desc: 'Review transfer logs on both the client and server side to understand what data was exposed.', cmd: `lsof -p ${pid} 2>&1` },
           { label: 'Rotate credentials used with this service',   desc: 'Any username/password sent over this connection is compromised — change it on every service where it is reused.' },
-          { label: 'Block FTP and Telnet outbound at the firewall', desc: 'Prevent future cleartext transfers by dropping outbound TCP on ports 21 and 23 system-wide.' },
+          { label: 'Block FTP and Telnet outbound at the firewall', desc: 'Prevent future cleartext transfers by dropping outbound TCP on ports 21 and 23 system-wide.', cmd: `(echo 'block drop out quick proto tcp from any to any port 21' && echo 'block drop out quick proto tcp from any to any port 23') | sudo pfctl -ef -` },
         ],
         commands: [
           { label: 'All files opened by this process', cmd: `lsof -p ${pid}` },
@@ -224,8 +308,8 @@ function buildDetail(f: IntruderFinding): Detail {
       return {
         impacts: ['Suspicious network activity detected — investigate immediately to determine scope.'],
         actions: [
-          { label: 'Kill the process', desc: 'Terminate to stop the suspicious activity.' },
-          { label: 'Investigate the process', desc: 'Check its full path, binary signature, and all open network connections.' },
+          { label: 'Kill the process', desc: 'Terminate to stop the suspicious activity.', isKill: true },
+          { label: 'Investigate the process', desc: 'Check its full path, binary signature, and all open network connections.', cmd: `ps -p ${pid} -o user,pid,ppid,args 2>&1 && lsof -p ${pid} -i 2>&1 && codesign -dv "$(ps -p ${pid} -o args= | awk '{print $1}')" 2>&1` },
         ],
         commands: [
           { label: 'Full process info',     cmd: `ps -p ${pid} -o user,pid,ppid,args` },
@@ -373,6 +457,17 @@ async function killProcess() {
               <div class="step-label">{{ action.label }}</div>
               <div class="step-desc">{{ action.desc }}</div>
             </div>
+            <button
+              v-if="action.cmd || action.isKill"
+              class="exec-btn"
+              @click="executeAction(action.label, action.cmd ?? '', action.isKill)"
+              title="Execute this action"
+            >
+              <svg viewBox="0 0 10 12" fill="currentColor" style="width:8px;height:8px;flex-shrink:0">
+                <polygon points="0,0 10,6 0,12"/>
+              </svg>
+              Run
+            </button>
           </li>
         </ol>
       </div>
@@ -437,6 +532,65 @@ async function killProcess() {
 
     </div>
   </aside>
+
+  <!-- Execution modal -->
+  <Teleport to="body">
+    <div v-if="execOpen" class="exec-overlay" @click.self="closeExec">
+      <div class="exec-modal" role="dialog" :aria-label="execLabel">
+
+        <div class="exec-modal-header">
+          <div class="exec-modal-title">{{ execLabel }}</div>
+          <button class="close-btn" @click="closeExec">✕</button>
+        </div>
+
+        <div class="exec-modal-body">
+
+          <!-- Command shown -->
+          <div>
+            <div class="exec-section-label">Command</div>
+            <pre class="exec-code">{{ execCmd }}</pre>
+          </div>
+
+          <!-- Running state -->
+          <div v-if="execRunning" class="exec-status running">
+            <span class="exec-spinner"/>
+            Running…
+          </div>
+
+          <!-- Result -->
+          <template v-else-if="execResult">
+            <div :class="['exec-status', execResult.success ? 'success' : 'error']">
+              <svg v-if="execResult.success" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;flex-shrink:0">
+                <circle cx="8" cy="8" r="6.5" stroke="var(--green)"/>
+                <polyline points="5 8 7 10.5 11 5.5" stroke="var(--green)"/>
+              </svg>
+              <svg v-else viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;flex-shrink:0">
+                <circle cx="8" cy="8" r="6.5" stroke="var(--red)"/>
+                <line x1="5.5" y1="5.5" x2="10.5" y2="10.5" stroke="var(--red)"/>
+                <line x1="10.5" y1="5.5" x2="5.5" y2="10.5" stroke="var(--red)"/>
+              </svg>
+              {{ execResult.success ? 'Completed' : 'Error' }}
+            </div>
+
+            <div v-if="(execResult.stdout + execResult.stderr).trim()">
+              <div class="exec-section-label">Output</div>
+              <pre class="exec-output">{{ (execResult.stdout + (execResult.stderr ? '\n' + execResult.stderr : '')).trim() }}</pre>
+            </div>
+
+            <div class="exec-summary">
+              <div class="exec-section-label">Summary</div>
+              <div class="exec-summary-text">{{ execSummary(execLabel, execResult) }}</div>
+            </div>
+          </template>
+
+        </div>
+
+        <div class="exec-modal-footer">
+          <button class="exec-close-btn" @click="closeExec">Close</button>
+        </div>
+      </div>
+    </div>
+  </Teleport>
 </template>
 
 <style scoped>
@@ -658,7 +812,7 @@ async function killProcess() {
   margin-top: 2px;
 }
 
-.step-body { display: flex; flex-direction: column; gap: 3px; }
+.step-body { flex: 1; display: flex; flex-direction: column; gap: 3px; }
 
 .step-label {
   font-size: 12px;
@@ -747,4 +901,187 @@ async function killProcess() {
   line-height: 1.5;
   margin-top: 7px;
 }
+
+/* Execute button */
+.exec-btn {
+  flex-shrink: 0;
+  align-self: flex-start;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  font-family: inherit;
+  background: rgba(63, 185, 80, 0.1);
+  border: 1px solid rgba(63, 185, 80, 0.28);
+  color: var(--green);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+  white-space: nowrap;
+  margin-top: 2px;
+}
+.exec-btn:hover {
+  background: rgba(63, 185, 80, 0.2);
+  border-color: rgba(63, 185, 80, 0.5);
+}
+
+/* Execution modal overlay */
+.exec-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.exec-modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  width: 540px;
+  max-width: 100%;
+  max-height: calc(100vh - 80px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.exec-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 13px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.exec-modal-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  min-width: 0;
+}
+
+.exec-modal-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.exec-section-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--muted);
+  font-weight: 600;
+  margin-bottom: 5px;
+}
+
+.exec-code {
+  font-family: 'SF Mono', 'Menlo', monospace;
+  font-size: 11px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 9px 11px;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+  line-height: 1.55;
+}
+
+.exec-output {
+  font-family: 'SF Mono', 'Menlo', monospace;
+  font-size: 11px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 9px 11px;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+  line-height: 1.55;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.exec-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 8px 12px;
+  border-radius: 7px;
+  border: 1px solid;
+}
+.exec-status.running {
+  color: var(--muted);
+  background: var(--surface-2);
+  border-color: var(--border);
+}
+.exec-status.success {
+  color: var(--green);
+  background: var(--green-dim);
+  border-color: rgba(63, 185, 80, 0.25);
+}
+.exec-status.error {
+  color: var(--red);
+  background: var(--red-dim);
+  border-color: rgba(248, 81, 73, 0.25);
+}
+
+.exec-spinner {
+  width: 13px;
+  height: 13px;
+  border: 2px solid var(--border);
+  border-top-color: var(--muted);
+  border-radius: 50%;
+  animation: exec-spin 0.75s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes exec-spin { to { transform: rotate(360deg); } }
+
+.exec-summary-text {
+  font-size: 12px;
+  color: var(--text);
+  line-height: 1.6;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+
+.exec-modal-footer {
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: flex-end;
+  flex-shrink: 0;
+}
+
+.exec-close-btn {
+  padding: 7px 18px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.exec-close-btn:hover { background: var(--border); }
 </style>

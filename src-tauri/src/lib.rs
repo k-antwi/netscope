@@ -778,6 +778,29 @@ fn kill_process(pid: u32) -> Result<(), String> {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CommandResult {
+    pub stdout: String,
+    pub stderr: String,
+    pub success: bool,
+}
+
+#[tauri::command]
+async fn run_command(cmd: String) -> Result<CommandResult, String> {
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new("sh").args(["-c", &cmd]).output()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+
+    Ok(CommandResult {
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        success: output.status.success(),
+    })
+}
+
 // ── Intruder Detection ───────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1164,7 +1187,7 @@ pub fn run() {
             tauri::async_runtime::spawn(start_ws_server(handle));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_connections, investigate_ip, get_inbound, investigate_service, get_issues, get_system_metrics, scan_files, cancel_file_scan, delete_files, get_file_details, reveal_in_finder, check_malware, check_cves, scan_for_threats, cancel_defender_scan, neutralize_threat, save_defender_scan, load_last_defender_scan, save_security_report, load_security_reports, spot_intruder, kill_process])
+        .invoke_handler(tauri::generate_handler![get_connections, investigate_ip, get_inbound, investigate_service, get_issues, get_system_metrics, scan_files, cancel_file_scan, delete_files, get_file_details, reveal_in_finder, check_malware, check_cves, scan_for_threats, cancel_defender_scan, neutralize_threat, save_defender_scan, load_last_defender_scan, save_security_report, load_security_reports, spot_intruder, kill_process, run_command])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
