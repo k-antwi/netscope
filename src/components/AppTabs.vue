@@ -20,7 +20,7 @@ const tabs: { key: TabKey; label: string }[] = [
 </script>
 
 <template>
-  <nav class="sidebar" data-tauri-drag-region>
+  <nav class="sidebar">
     <!-- Traffic light clearance zone (macOS overlay title bar) -->
     <div class="traffic-zone" />
 

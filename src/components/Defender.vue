@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import type { ThreatItem, DefenderProgress, DefenderScanResult, StoredScan, SecurityReport, IntruderFinding, IntruderReport } from '../types'
 import IntruderDetail from './IntruderDetail.vue'
+import ThreatDetail from './ThreatDetail.vue'
 
 type ScanType = 'full' | 'quick' | 'custom'
 type DefenderPane = 'scanner' | 'reports' | 'intruder'
@@ -29,6 +30,28 @@ const activePane = ref<DefenderPane>('scanner')
 const reports = ref<SecurityReport[]>([])
 const reportsLoading = ref(false)
 const expandedReport = ref<string | null>(null)
+
+// Threat detail flyover
+const selectedThreat = ref<ThreatItem | null>(null)
+const selectedThreatReport = ref<SecurityReport | null>(null)
+const selectedThreatNeutralized = computed(() => {
+  if (!selectedThreat.value) return false
+  if (selectedThreatReport.value) {
+    return selectedThreatReport.value.neutralized.includes(selectedThreat.value.path)
+  }
+  return neutralized.value.has(selectedThreat.value.path)
+})
+
+function openThreatDetail(t: ThreatItem, report: SecurityReport | null = null) {
+  selectedThreat.value = t
+  selectedThreatReport.value = report
+}
+
+function onThreatNeutralized(path: string) {
+  neutralized.value = new Set([...neutralized.value, path])
+  storedUnfixedCount.value = Math.max(0, storedUnfixedCount.value - 1)
+  persistScan()
+}
 
 // Intruder pane
 const intruderRunning = ref(false)
@@ -72,6 +95,8 @@ async function loadReports() {
 
 async function switchPane(pane: DefenderPane) {
   activePane.value = pane
+  selectedThreat.value = null
+  selectedThreatReport.value = null
   if (pane === 'reports') await loadReports()
 }
 
@@ -458,6 +483,7 @@ onUnmounted(() => {
 
       <!-- Reports pane -->
       <div v-else-if="activePane === 'reports'" class="reports-pane">
+      <div class="reports-main">
 
         <!-- Current scan results (shown immediately after a scan runs) -->
         <template v-if="result">
@@ -520,7 +546,8 @@ onUnmounted(() => {
                 <tr
                   v-for="t in threats"
                   :key="t.path"
-                  :class="['threat-row', { neutralized: neutralized.has(t.path) }]"
+                  :class="['threat-row', { neutralized: neutralized.has(t.path), selected: selectedThreat?.path === t.path }]"
+                  @click="openThreatDetail(t)"
                 >
                   <td class="threat-name">
                     <span class="tname">{{ t.name }}</span>
@@ -541,7 +568,7 @@ onUnmounted(() => {
                       <button
                         class="btn danger"
                         :disabled="neutralizing.has(t.path)"
-                        @click="neutralize(t)"
+                        @click.stop="neutralize(t)"
                       >
                         {{ neutralizing.has(t.path) ? '…' : 'Neutralize' }}
                       </button>
@@ -617,7 +644,12 @@ onUnmounted(() => {
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="t in report.result.threats" :key="t.path" class="threat-row">
+                  <tr
+                    v-for="t in report.result.threats"
+                    :key="t.path"
+                    :class="['threat-row', { selected: selectedThreat?.path === t.path }]"
+                    @click="openThreatDetail(t, report)"
+                  >
                     <td class="threat-name">
                       <span class="tname">{{ t.name }}</span>
                       <span class="treason">{{ t.reason }}</span>
@@ -635,7 +667,18 @@ onUnmounted(() => {
           </div>
         </div>
         </template>
-      </div>
+      </div><!-- reports-main -->
+
+      <Transition name="panel">
+        <ThreatDetail
+          v-if="selectedThreat"
+          :threat="selectedThreat"
+          :is-neutralized="selectedThreatNeutralized"
+          @close="selectedThreat = null; selectedThreatReport = null"
+          @neutralized="onThreatNeutralized"
+        />
+      </Transition>
+      </div><!-- reports-pane -->
 
       <div v-else class="hero">
         <div class="hero-meta">
@@ -960,9 +1003,10 @@ td {
   border-bottom: 1px solid rgba(48, 54, 61, 0.5);
   vertical-align: middle;
 }
-.threat-row { transition: background 0.1s; }
+.threat-row { transition: background 0.1s; cursor: pointer; }
 .threat-row:hover { background: var(--surface-2); }
 .threat-row.neutralized { opacity: 0.45; }
+.threat-row.selected { background: rgba(88, 166, 255, 0.07); }
 
 .threat-name { min-width: 200px; max-width: 260px; }
 .tname {
@@ -1191,8 +1235,16 @@ td {
 .reports-pane {
   flex: 1;
   display: flex;
+  flex-direction: row;
+  overflow: hidden;
+}
+
+.reports-main {
+  flex: 1;
+  display: flex;
   flex-direction: column;
   overflow: hidden;
+  min-width: 0;
 }
 
 .report-list {
