@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import type { SystemMetrics } from '../types'
+import type { SystemMetrics, StoredScan } from '../types'
 import { useOutbound } from '../composables/useOutbound'
 import { useInbound } from '../composables/useInbound'
 import { useAlerts } from '../composables/useAlerts'
@@ -44,7 +44,7 @@ async function fetchMetrics() {
   } catch { /* ignore errors silently */ }
 }
 
-onMounted(() => { fetchMetrics(); sysTimer = setInterval(fetchMetrics, 3000) })
+onMounted(() => { fetchMetrics(); fetchDefenderScan(); sysTimer = setInterval(fetchMetrics, 3000) })
 onUnmounted(() => { if (sysTimer) clearInterval(sysTimer) })
 
 // --- System metric accessors ---
@@ -98,6 +98,49 @@ const topProcesses = computed(() => {
 })
 
 const recentAlerts = computed(() => issues.value.slice(0, 6))
+
+// --- Defender ---
+const lastScan = ref<StoredScan | null>(null)
+
+async function fetchDefenderScan() {
+  try {
+    lastScan.value = await invoke<StoredScan | null>('load_last_defender_scan')
+  } catch { /* ignore */ }
+}
+
+const defenderStats = computed(() => {
+  const scan = lastScan.value
+  if (!scan) return { threats: 0, active: 0, scanned: 0, type: null as string | null, timestamp: null as number | null }
+  const active = scan.result.threats.filter(t => !scan.neutralized.includes(t.path)).length
+  return {
+    threats: scan.result.threats.length,
+    active,
+    scanned: scan.result.scanned_files,
+    type: scan.result.scan_type,
+    timestamp: scan.timestamp,
+  }
+})
+
+const recentThreats = computed(() => lastScan.value?.result.threats.slice(0, 5) ?? [])
+
+function fmtScanAge(unixSecs: number): string {
+  const ago = Date.now() - unixSecs * 1000
+  const mins = Math.floor(ago / 60000)
+  if (mins < 60) return `${mins}m ago`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24) return `${hrs}h ago`
+  return `${Math.floor(hrs / 24)}d ago`
+}
+
+function threatTypeLabel(t: string): string {
+  const labels: Record<string, string> = {
+    suspicious_launchagent: 'Launch Agent',
+    suspicious_script: 'Script',
+    suspicious_executable: 'Executable',
+    hidden_executable: 'Hidden File',
+  }
+  return labels[t] ?? t
+}
 
 // --- SVG helpers ---
 function sparkPath(data: number[], w: number, h: number, fill: boolean): string {
@@ -316,6 +359,28 @@ function sevColor(sev: string) {
         </div>
       </div>
 
+      <!-- Defender -->
+      <div class="card activity-card">
+        <div class="act-icon act-defender">
+          <svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 2L3 5v5c0 3.5 2.5 6.5 6 7.5C12.5 16.5 15 13.5 15 10V5L9 2z"/>
+          </svg>
+        </div>
+        <div class="act-num" :class="defenderStats.active > 0 ? 'text-red' : ''">
+          {{ defenderStats.active }}
+        </div>
+        <div class="act-label">Threats</div>
+        <div class="act-pills" v-if="defenderStats.timestamp">
+          <span class="pill" :class="defenderStats.threats > 0 ? 'red' : 'green'">
+            {{ defenderStats.threats }} found
+          </span>
+          <span class="pill muted">{{ fmtScanAge(defenderStats.timestamp) }}</span>
+        </div>
+        <div class="act-pills" v-else>
+          <span class="pill muted">No scan yet</span>
+        </div>
+      </div>
+
     </div>
 
     <!-- ── Row 3: Details ── -->
@@ -356,6 +421,28 @@ function sevColor(sev: string) {
           </div>
         </div>
         <div class="empty" v-else>No alerts detected</div>
+      </div>
+
+      <!-- Defender Threats -->
+      <div class="card detail-card">
+        <div class="detail-head">
+          <span class="detail-title">Defender Threats</span>
+          <span class="detail-sub">
+            {{ defenderStats.timestamp ? `${defenderStats.scanned.toLocaleString()} files scanned` : 'no scan data' }}
+          </span>
+        </div>
+        <div class="threat-list" v-if="recentThreats.length">
+          <div class="threat-row" v-for="t in recentThreats" :key="t.path">
+            <span class="threat-dot" :style="{ color: sevColor(t.severity) }">●</span>
+            <div class="threat-body">
+              <span class="threat-name">{{ t.name }}</span>
+              <span class="threat-type">{{ threatTypeLabel(t.threat_type) }}</span>
+            </div>
+            <span class="threat-sev" :style="{ color: sevColor(t.severity) }">{{ t.severity }}</span>
+          </div>
+        </div>
+        <div class="empty" v-else-if="defenderStats.timestamp">No threats found</div>
+        <div class="empty" v-else>Run a scan in Defender</div>
       </div>
 
     </div>
@@ -549,7 +636,7 @@ function sevColor(sev: string) {
 /* ── Activity row ── */
 .activity-row {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 12px;
   flex-shrink: 0;
 }
@@ -574,10 +661,11 @@ function sevColor(sev: string) {
 
 .act-icon svg { width: 16px; height: 16px; }
 
-.act-out     { background: rgba(88, 166, 255, 0.12); color: #58a6ff; }
-.act-in      { background: rgba(63, 185, 80, 0.12);  color: #3fb950; }
-.act-alert   { background: rgba(248, 81, 73, 0.12);  color: #f85149; }
-.act-browser { background: rgba(210, 153, 34, 0.12); color: #d29922; }
+.act-out      { background: rgba(88, 166, 255, 0.12); color: #58a6ff; }
+.act-in       { background: rgba(63, 185, 80, 0.12);  color: #3fb950; }
+.act-alert    { background: rgba(248, 81, 73, 0.12);  color: #f85149; }
+.act-browser  { background: rgba(210, 153, 34, 0.12); color: #d29922; }
+.act-defender { background: rgba(163, 113, 247, 0.12); color: #a371f7; }
 
 .act-num {
   font-size: 28px;
@@ -630,7 +718,7 @@ function sevColor(sev: string) {
 /* ── Detail row ── */
 .detail-row {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr 1fr 1fr;
   gap: 12px;
   flex: 1;
   min-height: 0;
@@ -758,6 +846,57 @@ function sevColor(sev: string) {
 }
 
 .alert-sev {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+
+/* Threat list */
+.threat-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+}
+
+.threat-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--surface-2);
+}
+
+.threat-dot {
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+.threat-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.threat-name {
+  font-size: 11px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.threat-type {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.threat-sev {
   font-size: 9px;
   font-weight: 700;
   text-transform: uppercase;

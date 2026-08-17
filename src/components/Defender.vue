@@ -114,7 +114,7 @@ onMounted(async () => {
   try {
     const stored = await invoke<StoredScan | null>('load_last_defender_scan')
     if (stored) {
-      result.value = stored.result
+      // Only restore metadata — don't set result.value so Defender always opens on Scanner
       lastStoredResult.value = stored.result
       neutralized.value = new Set(stored.neutralized)
       storedTimestamp.value = stored.timestamp
@@ -124,6 +124,11 @@ onMounted(async () => {
     }
   } catch { /* first launch or corrupted file — silently ignore */ }
 })
+
+function checkNow() {
+  result.value = lastStoredResult.value
+  switchPane('reports')
+}
 
 async function startScan(type: ScanType, paths: string[] = []) {
   if (isScanning.value) return
@@ -156,6 +161,7 @@ async function startScan(type: ScanType, paths: string[] = []) {
         result: result.value,
         neutralized: [],
       }).catch(() => {})
+      await switchPane('reports')
     }
   } catch (e) {
     error.value = typeof e === 'string' ? e : String(e)
@@ -292,108 +298,6 @@ onUnmounted(() => {
       <div class="state-sub">{{ error }}</div>
       <button class="btn primary" @click="result = null; error = ''">Back</button>
     </div>
-
-    <!-- ── Results state ── -->
-    <template v-else-if="result">
-      <!-- Re-scan bar -->
-      <div class="rescan-bar">
-        <div class="rescan-info">
-          <span class="rescan-stat">
-            <b>{{ result.threats.length }}</b>
-            {{ result.threats.length === 1 ? 'threat' : 'threats' }} found
-          </span>
-          <span class="sep">·</span>
-          <span class="rescan-stat">{{ result.scanned_files.toLocaleString() }} files scanned</span>
-          <span class="sep">·</span>
-          <span class="rescan-stat">{{ formatElapsed(result.elapsed_ms) }}</span>
-          <span v-if="result.cancelled" class="tag warn">stopped early</span>
-        </div>
-        <div class="rescan-actions">
-          <button class="btn ghost" @click="initiateScan('quick')">Quick Scan</button>
-          <button class="btn ghost" @click="initiateScan('full')">Full Scan</button>
-          <button class="btn ghost" @click="result = null">New scan</button>
-        </div>
-      </div>
-
-      <!-- Clean result -->
-      <div v-if="threats.length === 0" class="center-state grow">
-        <span class="clean-shield">
-          <svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M32 4L8 14v18c0 16 11 28 24 30 13-2 24-14 24-30V14L32 4z" stroke="var(--green)" stroke-width="2.5"/>
-            <polyline points="22 32 29 39 42 25" stroke="var(--green)" stroke-width="3"/>
-          </svg>
-        </span>
-        <div class="state-title">System clean</div>
-        <div class="state-sub">
-          No threats found across {{ result.scanned_files.toLocaleString() }} files.
-        </div>
-      </div>
-
-      <!-- Threat list -->
-      <div v-else class="threat-list-wrap">
-        <div v-if="activeThreats.length === 0 && neutralized.size > 0" class="center-state grow">
-          <span class="clean-shield">
-            <svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M32 4L8 14v18c0 16 11 28 24 30 13-2 24-14 24-30V14L32 4z" stroke="var(--green)" stroke-width="2.5"/>
-              <polyline points="22 32 29 39 42 25" stroke="var(--green)" stroke-width="3"/>
-            </svg>
-          </span>
-          <div class="state-title">All threats neutralized</div>
-          <div class="state-sub">{{ neutralized.size }} item{{ neutralized.size === 1 ? '' : 's' }} moved to quarantine.</div>
-        </div>
-
-        <table v-else>
-          <thead>
-            <tr>
-              <th>Threat</th>
-              <th>Type</th>
-              <th>Severity</th>
-              <th>Location</th>
-              <th>Size</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="t in threats"
-              :key="t.path"
-              :class="['threat-row', { neutralized: neutralized.has(t.path) }]"
-            >
-              <td class="threat-name">
-                <span class="tname">{{ t.name }}</span>
-                <span class="treason">{{ t.reason }}</span>
-              </td>
-              <td>
-                <span class="type-tag">{{ threatTypeLabel(t.threat_type) }}</span>
-              </td>
-              <td>
-                <span
-                  class="sev-badge"
-                  :class="t.severity"
-                >{{ severityLabel(t.severity) }}</span>
-              </td>
-              <td class="path-cell mono">{{ truncate(t.path) }}</td>
-              <td class="size-cell mono">{{ formatSize(t.size) }}</td>
-              <td class="action-cell">
-                <span v-if="neutralized.has(t.path)" class="neutralized-label">Quarantined</span>
-                <div v-else class="action-group">
-                  <div v-if="neutralizeErrors.get(t.path)" class="action-error">
-                    {{ neutralizeErrors.get(t.path) }}
-                  </div>
-                  <button
-                    class="btn danger"
-                    :disabled="neutralizing.has(t.path)"
-                    @click="neutralize(t)"
-                  >
-                    {{ neutralizing.has(t.path) ? '…' : 'Neutralize' }}
-                  </button>
-                </div>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </template>
 
     <!-- ── Idle / scan selection ── -->
     <template v-else>
@@ -554,6 +458,103 @@ onUnmounted(() => {
 
       <!-- Reports pane -->
       <div v-else-if="activePane === 'reports'" class="reports-pane">
+
+        <!-- Current scan results (shown immediately after a scan runs) -->
+        <template v-if="result">
+          <div class="rescan-bar">
+            <div class="rescan-info">
+              <span class="rescan-stat">
+                <b>{{ result.threats.length }}</b>
+                {{ result.threats.length === 1 ? 'threat' : 'threats' }} found
+              </span>
+              <span class="sep">·</span>
+              <span class="rescan-stat">{{ result.scanned_files.toLocaleString() }} files scanned</span>
+              <span class="sep">·</span>
+              <span class="rescan-stat">{{ formatElapsed(result.elapsed_ms) }}</span>
+              <span v-if="result.cancelled" class="tag warn">stopped early</span>
+            </div>
+            <div class="rescan-actions">
+              <button class="btn ghost" @click="initiateScan('quick')">Quick Scan</button>
+              <button class="btn ghost" @click="initiateScan('full')">Full Scan</button>
+              <button class="btn ghost" @click="result = null; switchPane('scanner')">New Scan</button>
+            </div>
+          </div>
+
+          <!-- Clean result -->
+          <div v-if="threats.length === 0" class="center-state grow">
+            <span class="clean-shield">
+              <svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M32 4L8 14v18c0 16 11 28 24 30 13-2 24-14 24-30V14L32 4z" stroke="var(--green)" stroke-width="2.5"/>
+                <polyline points="22 32 29 39 42 25" stroke="var(--green)" stroke-width="3"/>
+              </svg>
+            </span>
+            <div class="state-title">System clean</div>
+            <div class="state-sub">No threats found across {{ result.scanned_files.toLocaleString() }} files.</div>
+          </div>
+
+          <!-- Threat list -->
+          <div v-else class="threat-list-wrap">
+            <div v-if="activeThreats.length === 0 && neutralized.size > 0" class="center-state grow">
+              <span class="clean-shield">
+                <svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M32 4L8 14v18c0 16 11 28 24 30 13-2 24-14 24-30V14L32 4z" stroke="var(--green)" stroke-width="2.5"/>
+                  <polyline points="22 32 29 39 42 25" stroke="var(--green)" stroke-width="3"/>
+                </svg>
+              </span>
+              <div class="state-title">All threats neutralized</div>
+              <div class="state-sub">{{ neutralized.size }} item{{ neutralized.size === 1 ? '' : 's' }} moved to quarantine.</div>
+            </div>
+
+            <table v-else>
+              <thead>
+                <tr>
+                  <th>Threat</th>
+                  <th>Type</th>
+                  <th>Severity</th>
+                  <th>Location</th>
+                  <th>Size</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr
+                  v-for="t in threats"
+                  :key="t.path"
+                  :class="['threat-row', { neutralized: neutralized.has(t.path) }]"
+                >
+                  <td class="threat-name">
+                    <span class="tname">{{ t.name }}</span>
+                    <span class="treason">{{ t.reason }}</span>
+                  </td>
+                  <td><span class="type-tag">{{ threatTypeLabel(t.threat_type) }}</span></td>
+                  <td>
+                    <span class="sev-badge" :class="t.severity">{{ severityLabel(t.severity) }}</span>
+                  </td>
+                  <td class="path-cell mono">{{ truncate(t.path) }}</td>
+                  <td class="size-cell mono">{{ formatSize(t.size) }}</td>
+                  <td class="action-cell">
+                    <span v-if="neutralized.has(t.path)" class="neutralized-label">Quarantined</span>
+                    <div v-else class="action-group">
+                      <div v-if="neutralizeErrors.get(t.path)" class="action-error">
+                        {{ neutralizeErrors.get(t.path) }}
+                      </div>
+                      <button
+                        class="btn danger"
+                        :disabled="neutralizing.has(t.path)"
+                        @click="neutralize(t)"
+                      >
+                        {{ neutralizing.has(t.path) ? '…' : 'Neutralize' }}
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </template>
+
+        <!-- Historical reports (shown when no active scan result) -->
+        <template v-else>
         <div v-if="reportsLoading" class="center-state">
           <span class="spin-lg">↺</span>
           <span>Loading reports…</span>
@@ -633,6 +634,7 @@ onUnmounted(() => {
             </div>
           </div>
         </div>
+        </template>
       </div>
 
       <div v-else class="hero">
@@ -707,8 +709,8 @@ onUnmounted(() => {
           <button
             class="btn primary"
             style="margin-left: auto; flex-shrink: 0"
-            @click="result = lastStoredResult"
-          >Check now</button>
+            @click="checkNow"
+          >View in Reports</button>
         </div>
         <div v-else-if="storedTimestamp && storedUnfixedCount === 0" class="issue-bar clean">
           <svg class="issue-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
