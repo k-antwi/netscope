@@ -9,7 +9,7 @@ use file_scan::{cancel_file_scan, delete_files, get_file_details, reveal_in_find
 use malware_check::check_malware;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::process::Command;
 use tauri::Emitter;
 
@@ -763,6 +763,349 @@ async fn get_system_metrics() -> SystemMetrics {
     SystemMetrics { cpu_percent, memory_used_gb, memory_total_gb, net_in_bytes, net_out_bytes }
 }
 
+// ── Intruder Detection ───────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IntruderFinding {
+    pub id: String,
+    pub severity: String,
+    pub category: String,
+    pub title: String,
+    pub description: String,
+    pub process: String,
+    pub pid: u32,
+    pub remote_ip: String,
+    pub remote_port: u16,
+    pub local_port: u16,
+    pub recommendation: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IntruderReport {
+    pub findings: Vec<IntruderFinding>,
+    pub connections_analyzed: usize,
+    pub elapsed_ms: u64,
+}
+
+const MALICIOUS_PORTS: &[(u16, &str, &str)] = &[
+    (1337,  "Hacker / malware signaling port",         "Terminate the process and run a full malware scan"),
+    (31337, "Back Orifice classic backdoor port",      "Classic backdoor indicator — terminate immediately and scan"),
+    (4444,  "Metasploit default payload listener",     "Known attack-framework port — terminate the process immediately"),
+    (5554,  "Sasser worm port",                        "Malware indicator — terminate and run a full system scan"),
+    (6667,  "IRC (common botnet C2 channel)",           "IRC is frequently used for botnet command-and-control"),
+    (6668,  "IRC (common botnet C2 channel)",           "IRC is frequently used for botnet command-and-control"),
+    (6697,  "IRC over TLS (botnet C2)",                "Encrypted IRC — possible hidden botnet C2 channel"),
+    (7777,  "Common RAT / backdoor port",              "Terminate immediately and check for persistence mechanisms"),
+    (9001,  "Tor relay port",                          "Process may be relaying Tor network traffic"),
+    (9050,  "Tor SOCKS proxy port",                    "Process is routing traffic through the Tor anonymization network"),
+    (9150,  "Tor Browser SOCKS proxy",                 "Process is routing traffic through Tor"),
+    (12345, "NetBus remote-access trojan",             "Classic RAT port — terminate and investigate immediately"),
+    (54321, "Common backdoor reverse shell port",      "Known backdoor indicator — investigate immediately"),
+    (1080,  "SOCKS proxy (common malware C2 tunnel)",  "Traffic may be tunneled through a proxy to evade detection"),
+    (65535, "Max TCP port — often used by backdoors",  "Suspicious port choice commonly used to evade port scans"),
+];
+
+const BROWSER_PROCS: &[&str] = &[
+    "Google Chrome", "Google Chrome Helper", "firefox", "firefox-bin",
+    "Safari", "Chromium", "Brave Browser", "Arc", "Opera", "Vivaldi",
+    "Microsoft Edge", "msedge", "chrome",
+];
+
+const SUSPICIOUS_DIRS: &[&str] = &[
+    "/tmp/", "/private/tmp/", "/var/folders/", "/private/var/folders/",
+    "Downloads/", "/.Trash/",
+];
+
+fn is_browser_proc(name: &str) -> bool {
+    BROWSER_PROCS.iter().any(|b| {
+        name.eq_ignore_ascii_case(b) || name.starts_with(*b)
+    })
+}
+
+fn is_private_ip(ip: &str) -> bool {
+    ip == "127.0.0.1"
+        || ip == "::1"
+        || ip.starts_with("192.168.")
+        || ip.starts_with("10.")
+        || ip.starts_with("172.")
+        || ip.starts_with("fe80:")
+}
+
+#[tauri::command]
+async fn spot_intruder() -> Result<IntruderReport, String> {
+    let start = std::time::Instant::now();
+
+    let (lsof_raw, ps_raw) = tokio::join!(
+        shell_async("lsof -i -n -P 2>/dev/null".to_string()),
+        shell_async("ps -eo pid=,args= 2>/dev/null".to_string()),
+    );
+
+    // Build PID → full process path map from ps
+    let mut proc_paths: HashMap<u32, String> = HashMap::new();
+    for line in ps_raw.lines() {
+        let trimmed = line.trim();
+        let mut it = trimmed.splitn(2, ' ');
+        if let (Some(pid_s), Some(args)) = (it.next(), it.next()) {
+            if let Ok(pid) = pid_s.trim().parse::<u32>() {
+                proc_paths.insert(pid, args.trim().to_string());
+            }
+        }
+    }
+
+    let outbound = parse_connections(&lsof_raw, true);
+    let inbound = parse_inbound(&lsof_raw, true);
+    let connections_analyzed = outbound.len() + inbound.len();
+
+    let mut findings: Vec<IntruderFinding> = Vec::new();
+    let mut next_id: u32 = 0;
+    macro_rules! new_id { () => {{ next_id += 1; next_id.to_string() }} }
+
+    // ── Rule 1: Outbound connections to known malicious ports ────────────────
+    for conn in &outbound {
+        if let Some(&(_, label, rec)) = MALICIOUS_PORTS.iter().find(|(p, _, _)| *p == conn.remote_port) {
+            findings.push(IntruderFinding {
+                id: new_id!(),
+                severity: "critical".to_string(),
+                category: "known_bad_port".to_string(),
+                title: format!("{} connected to malicious port {}", conn.process, conn.remote_port),
+                description: format!(
+                    "{} (PID {}) has an active connection to {}:{} — {}.",
+                    conn.process, conn.pid, conn.remote_ip, conn.remote_port, label
+                ),
+                process: conn.process.clone(),
+                pid: conn.pid,
+                remote_ip: conn.remote_ip.clone(),
+                remote_port: conn.remote_port,
+                local_port: 0,
+                recommendation: rec.to_string(),
+            });
+        }
+    }
+
+    // ── Rule 2: Process running from suspicious path making connections ───────
+    let mut seen_sus_pid: HashSet<u32> = HashSet::new();
+    for conn in &outbound {
+        if seen_sus_pid.contains(&conn.pid) { continue; }
+        if is_browser_proc(&conn.process) { continue; }
+        let path = proc_paths.get(&conn.pid).map(|s| s.as_str()).unwrap_or("");
+        if let Some(frag) = SUSPICIOUS_DIRS.iter().find(|&&f| path.contains(f)) {
+            seen_sus_pid.insert(conn.pid);
+            findings.push(IntruderFinding {
+                id: new_id!(),
+                severity: "high".to_string(),
+                category: "suspicious_process".to_string(),
+                title: format!("{} running from suspicious location", conn.process),
+                description: format!(
+                    "Process {} (PID {}) is making network connections but runs from '{}' — a directory commonly exploited by malware (matched '{}'). Legitimate apps rarely run from here.",
+                    conn.process, conn.pid, path, frag
+                ),
+                process: conn.process.clone(),
+                pid: conn.pid,
+                remote_ip: conn.remote_ip.clone(),
+                remote_port: conn.remote_port,
+                local_port: 0,
+                recommendation: "Terminate this process, quarantine the binary, and run a full Defender scan.".to_string(),
+            });
+        }
+    }
+
+    // ── Rule 3: Lateral movement — single process hitting multiple local hosts ─
+    {
+        let mut proc_local: HashMap<(String, u32), HashSet<String>> = HashMap::new();
+        for conn in &outbound {
+            if is_browser_proc(&conn.process) { continue; }
+            if is_private_ip(&conn.remote_ip) && conn.remote_ip != "127.0.0.1" && conn.remote_ip != "::1" {
+                proc_local
+                    .entry((conn.process.clone(), conn.pid))
+                    .or_default()
+                    .insert(conn.remote_ip.clone());
+            }
+        }
+        for ((proc, pid), ips) in &proc_local {
+            if ips.len() >= 3 {
+                findings.push(IntruderFinding {
+                    id: new_id!(),
+                    severity: "high".to_string(),
+                    category: "lateral_movement".to_string(),
+                    title: format!("{} contacting {} local hosts", proc, ips.len()),
+                    description: format!(
+                        "{} (PID {}) has active connections to {} distinct hosts on the local network. This is a hallmark of lateral movement — an attacker pivoting to compromise other machines.",
+                        proc, pid, ips.len()
+                    ),
+                    process: proc.clone(),
+                    pid: *pid,
+                    remote_ip: ips.iter().next().cloned().unwrap_or_default(),
+                    remote_port: 0,
+                    local_port: 0,
+                    recommendation: "Isolate this machine from the network, terminate the process, and investigate the activity log.".to_string(),
+                });
+            }
+        }
+    }
+
+    // ── Rule 4: Port scan / mass external connections ────────────────────────
+    {
+        let mut proc_ext: HashMap<(String, u32), HashSet<String>> = HashMap::new();
+        for conn in &outbound {
+            if is_browser_proc(&conn.process) { continue; }
+            if !is_private_ip(&conn.remote_ip) {
+                proc_ext
+                    .entry((conn.process.clone(), conn.pid))
+                    .or_default()
+                    .insert(conn.remote_ip.clone());
+            }
+        }
+        for ((proc, pid), ips) in &proc_ext {
+            if ips.len() >= 10 {
+                findings.push(IntruderFinding {
+                    id: new_id!(),
+                    severity: "high".to_string(),
+                    category: "port_scan".to_string(),
+                    title: format!("{} connecting to {} external hosts simultaneously", proc, ips.len()),
+                    description: format!(
+                        "{} (PID {}) has live connections to {} unique external IP addresses. Legitimate desktop apps rarely maintain this many simultaneous external connections — this may indicate port scanning, a botnet, or data exfiltration.",
+                        proc, pid, ips.len()
+                    ),
+                    process: proc.clone(),
+                    pid: *pid,
+                    remote_ip: ips.iter().next().cloned().unwrap_or_default(),
+                    remote_port: 0,
+                    local_port: 0,
+                    recommendation: "Investigate what this process is doing. If unexpected, terminate it and check for malware.".to_string(),
+                });
+            }
+        }
+    }
+
+    // ── Rule 5: Backdoor listener — unusual port exposed on all interfaces ───
+    {
+        const SAFE_LISTEN: &[u16] = &[
+            22, 80, 443, 631, 3000, 3306, 4000, 5000, 5173, 5432, 8080, 8443,
+            8000, 8888, 9000, 9229, 27017,
+        ];
+        for conn in &inbound {
+            if conn.state != "LISTEN" || !conn.is_all_interfaces { continue; }
+            if SAFE_LISTEN.contains(&conn.local_port) { continue; }
+
+            if let Some(&(_, label, rec)) = MALICIOUS_PORTS.iter().find(|(p, _, _)| *p == conn.local_port) {
+                findings.push(IntruderFinding {
+                    id: new_id!(),
+                    severity: "critical".to_string(),
+                    category: "backdoor_listener".to_string(),
+                    title: format!("Backdoor port {} open on all interfaces", conn.local_port),
+                    description: format!(
+                        "{} (PID {}) is listening on port {} on all network interfaces — {}. This may be a remote-access backdoor accepting inbound connections.",
+                        conn.process, conn.pid, conn.local_port, label
+                    ),
+                    process: conn.process.clone(),
+                    pid: conn.pid,
+                    remote_ip: String::new(),
+                    remote_port: 0,
+                    local_port: conn.local_port,
+                    recommendation: rec.to_string(),
+                });
+            } else if conn.local_port > 10000 && !is_browser_proc(&conn.process) {
+                findings.push(IntruderFinding {
+                    id: new_id!(),
+                    severity: "medium".to_string(),
+                    category: "backdoor_listener".to_string(),
+                    title: format!("{} exposing high port {} to the network", conn.process, conn.local_port),
+                    description: format!(
+                        "{} (PID {}) is listening on port {} on all network interfaces. This non-standard high port is not a recognized service and may be an unauthorized reverse shell or C2 listener.",
+                        conn.process, conn.pid, conn.local_port
+                    ),
+                    process: conn.process.clone(),
+                    pid: conn.pid,
+                    remote_ip: String::new(),
+                    remote_port: 0,
+                    local_port: conn.local_port,
+                    recommendation: "Confirm you authorized this listener. If not, terminate the process and check for persistence in LaunchAgents.".to_string(),
+                });
+            }
+        }
+    }
+
+    // ── Rule 6: Cleartext credential exfiltration (FTP / Telnet outbound) ────
+    {
+        let mut seen: HashSet<u32> = HashSet::new();
+        for conn in &outbound {
+            if !seen.insert(conn.pid) { continue; }
+            if is_private_ip(&conn.remote_ip) { continue; }
+            match conn.remote_port {
+                21 => findings.push(IntruderFinding {
+                    id: new_id!(),
+                    severity: "high".to_string(),
+                    category: "cleartext_exfil".to_string(),
+                    title: format!("{} transmitting data via cleartext FTP", conn.process),
+                    description: format!(
+                        "{} (PID {}) is connecting to {} over FTP (port 21). FTP sends credentials and all file data in plaintext — a trivial target for network eavesdroppers.",
+                        conn.process, conn.pid, conn.remote_ip
+                    ),
+                    process: conn.process.clone(),
+                    pid: conn.pid,
+                    remote_ip: conn.remote_ip.clone(),
+                    remote_port: 21,
+                    local_port: 0,
+                    recommendation: "Replace FTP with SFTP or FTPS. If you did not initiate this transfer, the process may be exfiltrating data.".to_string(),
+                }),
+                23 => findings.push(IntruderFinding {
+                    id: new_id!(),
+                    severity: "critical".to_string(),
+                    category: "cleartext_exfil".to_string(),
+                    title: format!("{} connected over cleartext Telnet", conn.process),
+                    description: format!(
+                        "{} (PID {}) is connected to {} via Telnet (port 23). Telnet sends everything — including passwords — in plain text, visible to any network observer.",
+                        conn.process, conn.pid, conn.remote_ip
+                    ),
+                    process: conn.process.clone(),
+                    pid: conn.pid,
+                    remote_ip: conn.remote_ip.clone(),
+                    remote_port: 23,
+                    local_port: 0,
+                    recommendation: "Switch to SSH immediately. If you did not initiate this connection, terminate the process and investigate.".to_string(),
+                }),
+                _ => {}
+            }
+        }
+    }
+
+    // ── Rule 7: Hidden / dot-prefixed process with network access ────────────
+    {
+        let mut seen: HashSet<u32> = HashSet::new();
+        for conn in &outbound {
+            if !seen.insert(conn.pid) { continue; }
+            if conn.process.starts_with('.') {
+                findings.push(IntruderFinding {
+                    id: new_id!(),
+                    severity: "high".to_string(),
+                    category: "suspicious_process".to_string(),
+                    title: format!("Hidden process '{}' making network connections", conn.process),
+                    description: format!(
+                        "Process '{}' (PID {}) has a dot-prefixed name — a common trick to hide malware from casual inspection. It is actively connecting to {}:{}.",
+                        conn.process, conn.pid, conn.remote_ip, conn.remote_port
+                    ),
+                    process: conn.process.clone(),
+                    pid: conn.pid,
+                    remote_ip: conn.remote_ip.clone(),
+                    remote_port: conn.remote_port,
+                    local_port: 0,
+                    recommendation: format!("Inspect with: ps -p {} -o args | head -1  — then terminate and quarantine if unauthorized.", conn.pid),
+                });
+            }
+        }
+    }
+
+    // Sort critical → high → medium → low
+    let sev_rank = |s: &str| match s { "critical" => 0u8, "high" => 1, "medium" => 2, _ => 3 };
+    findings.sort_by_key(|f| sev_rank(&f.severity));
+
+    Ok(IntruderReport {
+        findings,
+        connections_analyzed,
+        elapsed_ms: start.elapsed().as_millis() as u64,
+    })
+}
+
 async fn start_ws_server(app_handle: tauri::AppHandle) {
     let listener = match tokio::net::TcpListener::bind("127.0.0.1:9922").await {
         Ok(l) => l,
@@ -806,7 +1149,7 @@ pub fn run() {
             tauri::async_runtime::spawn(start_ws_server(handle));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_connections, investigate_ip, get_inbound, investigate_service, get_issues, get_system_metrics, scan_files, cancel_file_scan, delete_files, get_file_details, reveal_in_finder, check_malware, check_cves, scan_for_threats, cancel_defender_scan, neutralize_threat, save_defender_scan, load_last_defender_scan, save_security_report, load_security_reports])
+        .invoke_handler(tauri::generate_handler![get_connections, investigate_ip, get_inbound, investigate_service, get_issues, get_system_metrics, scan_files, cancel_file_scan, delete_files, get_file_details, reveal_in_finder, check_malware, check_cves, scan_for_threats, cancel_defender_scan, neutralize_threat, save_defender_scan, load_last_defender_scan, save_security_report, load_security_reports, spot_intruder])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

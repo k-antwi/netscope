@@ -224,6 +224,34 @@ export interface SecurityReport {
   neutralized: string[]
 }
 
+export type IntruderCategory =
+  | 'known_bad_port'
+  | 'suspicious_process'
+  | 'lateral_movement'
+  | 'port_scan'
+  | 'backdoor_listener'
+  | 'cleartext_exfil'
+
+export interface IntruderFinding {
+  id: string
+  severity: 'critical' | 'high' | 'medium' | 'low'
+  category: IntruderCategory
+  title: string
+  description: string
+  process: string
+  pid: number
+  remote_ip: string
+  remote_port: number
+  local_port: number
+  recommendation: string
+}
+
+export interface IntruderReport {
+  findings: IntruderFinding[]
+  connections_analyzed: number
+  elapsed_ms: number
+}
+
 export const PORT_LABELS: Record<number, string> = {
   21: 'FTP',
   22: 'SSH',

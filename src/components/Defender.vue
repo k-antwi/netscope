@@ -2,10 +2,10 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import type { ThreatItem, DefenderProgress, DefenderScanResult, StoredScan, SecurityReport } from '../types'
+import type { ThreatItem, DefenderProgress, DefenderScanResult, StoredScan, SecurityReport, IntruderFinding, IntruderReport } from '../types'
 
 type ScanType = 'full' | 'quick' | 'custom'
-type DefenderPane = 'scanner' | 'reports'
+type DefenderPane = 'scanner' | 'reports' | 'intruder'
 
 const isScanning = ref(false)
 const activeScanType = ref<ScanType | null>(null)
@@ -28,6 +28,12 @@ const activePane = ref<DefenderPane>('scanner')
 const reports = ref<SecurityReport[]>([])
 const reportsLoading = ref(false)
 const expandedReport = ref<string | null>(null)
+
+// Intruder pane
+const intruderRunning = ref(false)
+const intruderReport = ref<IntruderReport | null>(null)
+const intruderError = ref('')
+const expandedFinding = ref<string | null>(null)
 
 let unlisten: UnlistenFn | null = null
 
@@ -66,6 +72,41 @@ async function loadReports() {
 async function switchPane(pane: DefenderPane) {
   activePane.value = pane
   if (pane === 'reports') await loadReports()
+}
+
+async function runIntruderScan() {
+  if (intruderRunning.value) return
+  intruderRunning.value = true
+  intruderError.value = ''
+  intruderReport.value = null
+  expandedFinding.value = null
+  try {
+    intruderReport.value = await invoke<IntruderReport>('spot_intruder')
+  } catch (e) {
+    intruderError.value = typeof e === 'string' ? e : String(e)
+  } finally {
+    intruderRunning.value = false
+  }
+}
+
+function toggleFinding(id: string) {
+  expandedFinding.value = expandedFinding.value === id ? null : id
+}
+
+function categoryLabel(c: string): string {
+  const labels: Record<string, string> = {
+    known_bad_port:    'Malicious Port',
+    suspicious_process:'Suspicious Process',
+    lateral_movement:  'Lateral Movement',
+    port_scan:         'Port Scan',
+    backdoor_listener: 'Backdoor',
+    cleartext_exfil:   'Cleartext Exfil',
+  }
+  return labels[c] ?? c
+}
+
+function intruderSeverityCount(sev: string): number {
+  return intruderReport.value?.findings.filter((f: IntruderFinding) => f.severity === sev).length ?? 0
 }
 
 onMounted(async () => {
@@ -367,10 +408,161 @@ onUnmounted(() => {
           :class="{ active: activePane === 'reports' }"
           @click="switchPane('reports')"
         >Reports</button>
+        <button
+          class="pane-tab"
+          :class="{ active: activePane === 'intruder' }"
+          @click="switchPane('intruder')"
+        >
+          Intruder
+          <span
+            v-if="intruderReport && intruderReport.findings.length > 0"
+            class="pane-badge"
+          >{{ intruderReport.findings.length }}</span>
+        </button>
+      </div>
+
+      <!-- Intruder pane -->
+      <div v-if="activePane === 'intruder'" class="intruder-pane">
+
+        <!-- Running -->
+        <div v-if="intruderRunning" class="center-state">
+          <div class="radar-running">
+            <svg viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <circle cx="60" cy="60" r="54" stroke="rgba(88,166,255,0.18)" stroke-width="1.5"/>
+              <circle cx="60" cy="60" r="38" stroke="rgba(88,166,255,0.14)" stroke-width="1.5"/>
+              <circle cx="60" cy="60" r="22" stroke="rgba(88,166,255,0.18)" stroke-width="1.5"/>
+              <circle cx="60" cy="60" r="6" fill="rgba(88,166,255,0.35)"/>
+              <line x1="60" y1="6" x2="60" y2="114" stroke="rgba(88,166,255,0.07)" stroke-width="1"/>
+              <line x1="6" y1="60" x2="114" y2="60" stroke="rgba(88,166,255,0.07)" stroke-width="1"/>
+              <path d="M60 60 L60 6 A54 54 0 0 1 113 77 Z" fill="url(#sweep-grad)" class="radar-sweep-arm"/>
+            </svg>
+            <defs>
+              <radialGradient id="sweep-grad" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(60 60) scale(54)">
+                <stop offset="0%" stop-color="rgba(88,166,255,0.35)"/>
+                <stop offset="100%" stop-color="rgba(88,166,255,0)"/>
+              </radialGradient>
+            </defs>
+          </div>
+          <div class="state-title">Analyzing network activity</div>
+          <div class="state-sub">Scanning connections for intrusion patterns…</div>
+        </div>
+
+        <!-- Error -->
+        <div v-else-if="intruderError" class="center-state">
+          <span class="state-icon error">⚠</span>
+          <div class="state-title">Analysis failed</div>
+          <div class="state-sub">{{ intruderError }}</div>
+          <button class="btn ghost" @click="intruderError = ''">Back</button>
+        </div>
+
+        <!-- Findings -->
+        <template v-else-if="intruderReport && intruderReport.findings.length > 0">
+          <div class="intruder-results-bar">
+            <div class="irb-left">
+              <span class="irb-count"><b>{{ intruderReport.findings.length }}</b> {{ intruderReport.findings.length === 1 ? 'finding' : 'findings' }}</span>
+              <span class="sep">·</span>
+              <span class="irb-stat">{{ intruderReport.connections_analyzed }} connections analyzed</span>
+              <span v-if="intruderSeverityCount('critical') > 0" class="sev-pill critical">{{ intruderSeverityCount('critical') }} critical</span>
+              <span v-if="intruderSeverityCount('high') > 0" class="sev-pill high">{{ intruderSeverityCount('high') }} high</span>
+              <span v-if="intruderSeverityCount('medium') > 0" class="sev-pill medium">{{ intruderSeverityCount('medium') }} medium</span>
+            </div>
+            <button class="btn ghost" @click="runIntruderScan">Re-run</button>
+          </div>
+
+          <div class="finding-list">
+            <div
+              v-for="f in intruderReport.findings"
+              :key="f.id"
+              class="finding-card"
+              :class="[f.severity, { expanded: expandedFinding === f.id }]"
+              @click="toggleFinding(f.id)"
+            >
+              <div class="fc-top">
+                <span class="sev-badge" :class="f.severity">{{ severityLabel(f.severity) }}</span>
+                <span class="cat-tag">{{ categoryLabel(f.category) }}</span>
+                <span class="fc-proc">
+                  {{ f.process }}
+                  <span class="fc-pid">PID {{ f.pid }}</span>
+                </span>
+                <span class="fc-chevron" :class="{ open: expandedFinding === f.id }">›</span>
+              </div>
+              <div class="fc-title">{{ f.title }}</div>
+              <div class="fc-desc">{{ f.description }}</div>
+
+              <div v-if="expandedFinding === f.id" class="fc-expanded">
+                <div v-if="f.remote_ip || f.local_port" class="fc-context">
+                  <span class="fc-context-label">Connection</span>
+                  <span v-if="f.remote_ip" class="mono">→ {{ f.remote_ip }}<template v-if="f.remote_port">:{{ f.remote_port }}</template></span>
+                  <span v-if="f.local_port" class="mono">Listening on :{{ f.local_port }}</span>
+                </div>
+                <div class="fc-rec">
+                  <span class="fc-rec-label">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;flex-shrink:0">
+                      <circle cx="8" cy="8" r="6.5"/>
+                      <line x1="8" y1="5.5" x2="8" y2="8.5"/>
+                      <circle cx="8" cy="11" r="0.6" fill="currentColor" stroke="none"/>
+                    </svg>
+                    Recommended action
+                  </span>
+                  {{ f.recommendation }}
+                </div>
+              </div>
+            </div>
+          </div>
+        </template>
+
+        <!-- Clean -->
+        <div v-else-if="intruderReport && intruderReport.findings.length === 0" class="center-state grow">
+          <span class="clean-shield">
+            <svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M32 4L8 14v18c0 16 11 28 24 30 13-2 24-14 24-30V14L32 4z" stroke="var(--green)" stroke-width="2.5"/>
+              <polyline points="22 32 29 39 42 25" stroke="var(--green)" stroke-width="3"/>
+            </svg>
+          </span>
+          <div class="state-title">No intrusions detected</div>
+          <div class="state-sub">
+            Analyzed {{ intruderReport.connections_analyzed }} active connections — no suspicious activity found.
+          </div>
+          <button class="btn ghost" style="margin-top:4px" @click="runIntruderScan">Re-run analysis</button>
+        </div>
+
+        <!-- Idle -->
+        <div v-else class="intruder-hero">
+          <div class="radar-idle">
+            <svg viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <circle cx="60" cy="60" r="54" stroke="rgba(88,166,255,0.15)" stroke-width="1.5"/>
+              <circle cx="60" cy="60" r="38" stroke="rgba(88,166,255,0.12)" stroke-width="1.5"/>
+              <circle cx="60" cy="60" r="22" stroke="rgba(88,166,255,0.18)" stroke-width="1.5"/>
+              <circle cx="60" cy="60" r="6" fill="rgba(88,166,255,0.3)" stroke="rgba(88,166,255,0.5)" stroke-width="1"/>
+              <line x1="60" y1="6" x2="60" y2="114" stroke="rgba(88,166,255,0.07)" stroke-width="1"/>
+              <line x1="6" y1="60" x2="114" y2="60" stroke="rgba(88,166,255,0.07)" stroke-width="1"/>
+            </svg>
+          </div>
+          <div class="intruder-title">Spot the Intruder</div>
+          <div class="intruder-desc">
+            Analyzes live network connections using cybersecurity heuristics — detecting backdoors, C2 beacons, lateral movement, suspicious processes, and malicious port usage.
+          </div>
+          <div class="intruder-techniques">
+            <span class="technique-tag">Malicious ports</span>
+            <span class="technique-tag">Lateral movement</span>
+            <span class="technique-tag">Backdoor listeners</span>
+            <span class="technique-tag">Suspicious processes</span>
+            <span class="technique-tag">Port scan detection</span>
+            <span class="technique-tag">Cleartext exfiltration</span>
+          </div>
+          <button class="btn intruder-run-btn" @click="runIntruderScan">
+            <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px">
+              <circle cx="10" cy="10" r="8.5"/>
+              <circle cx="10" cy="10" r="5" stroke-dasharray="3 2"/>
+              <circle cx="10" cy="10" r="1.5" fill="currentColor" stroke="none"/>
+            </svg>
+            Run Analysis
+          </button>
+        </div>
       </div>
 
       <!-- Reports pane -->
-      <div v-if="activePane === 'reports'" class="reports-pane">
+      <div v-else-if="activePane === 'reports'" class="reports-pane">
         <div v-if="reportsLoading" class="center-state">
           <span class="spin-lg">↺</span>
           <span>Loading reports…</span>
@@ -1134,5 +1326,297 @@ td {
   font-size: 11px;
   color: var(--red);
   font-weight: 500;
+}
+
+/* ── Pane badge ── */
+.pane-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  background: var(--red);
+  color: #fff;
+  margin-left: 5px;
+  line-height: 1;
+}
+
+/* ── Intruder pane ── */
+.intruder-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Hero / idle state */
+.intruder-hero {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: 48px 40px 56px;
+  background: radial-gradient(ellipse 80% 60% at 50% 0%, rgba(88,166,255,0.08) 0%, transparent 70%);
+}
+
+.radar-idle svg,
+.radar-idle {
+  width: 120px;
+  height: 120px;
+}
+
+.intruder-title {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.3px;
+}
+
+.intruder-desc {
+  font-size: 13px;
+  color: var(--muted);
+  max-width: 440px;
+  text-align: center;
+  line-height: 1.6;
+}
+
+.intruder-techniques {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: center;
+  max-width: 480px;
+}
+
+.technique-tag {
+  font-size: 11px;
+  padding: 3px 9px;
+  border-radius: 10px;
+  background: rgba(88,166,255,0.08);
+  border: 1px solid rgba(88,166,255,0.18);
+  color: var(--accent);
+}
+
+.intruder-run-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 10px 24px;
+  font-size: 13px;
+  font-weight: 600;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0d1117;
+  border-radius: 8px;
+}
+.intruder-run-btn:hover { filter: brightness(1.08); }
+
+/* Radar animation (running state) */
+.radar-running {
+  width: 120px;
+  height: 120px;
+  position: relative;
+}
+.radar-running svg {
+  width: 120px;
+  height: 120px;
+}
+
+@keyframes radar-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+.radar-sweep-arm {
+  transform-origin: 60px 60px;
+  animation: radar-spin 2s linear infinite;
+}
+
+/* Results bar */
+.intruder-results-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.irb-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.irb-count {
+  font-size: 12px;
+  color: var(--muted);
+}
+.irb-count b { color: var(--text); }
+
+.irb-stat {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.sev-pill {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 2px 7px;
+  border-radius: 8px;
+}
+.sev-pill.critical {
+  background: var(--red-dim);
+  color: var(--red);
+}
+.sev-pill.high {
+  background: rgba(210,153,34,0.12);
+  color: var(--orange);
+}
+.sev-pill.medium {
+  background: var(--surface-2);
+  color: var(--muted);
+}
+
+/* Finding list */
+.finding-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.finding-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: 10px;
+  padding: 14px 16px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.12s;
+}
+.finding-card:hover { background: rgba(88,166,255,0.03); }
+.finding-card.critical { border-left-color: var(--red); }
+.finding-card.high     { border-left-color: var(--orange); }
+.finding-card.medium   { border-left-color: #d29922; }
+.finding-card.low      { border-left-color: var(--border); }
+
+.fc-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.fc-proc {
+  font-size: 11px;
+  color: var(--text);
+  font-weight: 500;
+  margin-left: auto;
+}
+.fc-pid {
+  color: var(--muted);
+  font-weight: 400;
+  margin-left: 4px;
+}
+
+.fc-chevron {
+  font-size: 16px;
+  color: var(--muted);
+  transition: transform 0.15s;
+  line-height: 1;
+  margin-left: 4px;
+}
+.fc-chevron.open { transform: rotate(90deg); }
+
+.fc-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 4px;
+  line-height: 1.4;
+}
+
+.fc-desc {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.fc-expanded {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.fc-context {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}
+.fc-context-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  font-weight: 500;
+}
+.fc-ip {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.fc-rec {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  background: rgba(88,166,255,0.06);
+  border: 1px solid rgba(88,166,255,0.15);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--text);
+  line-height: 1.55;
+}
+
+.fc-rec-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--accent);
+}
+
+/* Category tag (distinct from type-tag) */
+.cat-tag {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: rgba(180,120,255,0.10);
+  border: 1px solid rgba(180,120,255,0.22);
+  color: #b478ff;
+  white-space: nowrap;
 }
 </style>
