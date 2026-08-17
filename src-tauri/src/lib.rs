@@ -763,6 +763,21 @@ async fn get_system_metrics() -> SystemMetrics {
     SystemMetrics { cpu_percent, memory_used_gb, memory_total_gb, net_in_bytes, net_out_bytes }
 }
 
+// ── Process Control ─────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn kill_process(pid: u32) -> Result<(), String> {
+    let out = Command::new("kill")
+        .args(["-9", &pid.to_string()])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
 // ── Intruder Detection ───────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1149,7 +1164,7 @@ pub fn run() {
             tauri::async_runtime::spawn(start_ws_server(handle));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_connections, investigate_ip, get_inbound, investigate_service, get_issues, get_system_metrics, scan_files, cancel_file_scan, delete_files, get_file_details, reveal_in_finder, check_malware, check_cves, scan_for_threats, cancel_defender_scan, neutralize_threat, save_defender_scan, load_last_defender_scan, save_security_report, load_security_reports, spot_intruder])
+        .invoke_handler(tauri::generate_handler![get_connections, investigate_ip, get_inbound, investigate_service, get_issues, get_system_metrics, scan_files, cancel_file_scan, delete_files, get_file_details, reveal_in_finder, check_malware, check_cves, scan_for_threats, cancel_defender_scan, neutralize_threat, save_defender_scan, load_last_defender_scan, save_security_report, load_security_reports, spot_intruder, kill_process])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

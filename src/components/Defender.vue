@@ -3,6 +3,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import type { ThreatItem, DefenderProgress, DefenderScanResult, StoredScan, SecurityReport, IntruderFinding, IntruderReport } from '../types'
+import IntruderDetail from './IntruderDetail.vue'
 
 type ScanType = 'full' | 'quick' | 'custom'
 type DefenderPane = 'scanner' | 'reports' | 'intruder'
@@ -33,7 +34,7 @@ const expandedReport = ref<string | null>(null)
 const intruderRunning = ref(false)
 const intruderReport = ref<IntruderReport | null>(null)
 const intruderError = ref('')
-const expandedFinding = ref<string | null>(null)
+const selectedFinding = ref<IntruderFinding | null>(null)
 
 let unlisten: UnlistenFn | null = null
 
@@ -79,7 +80,7 @@ async function runIntruderScan() {
   intruderRunning.value = true
   intruderError.value = ''
   intruderReport.value = null
-  expandedFinding.value = null
+  selectedFinding.value = null
   try {
     intruderReport.value = await invoke<IntruderReport>('spot_intruder')
   } catch (e) {
@@ -89,8 +90,8 @@ async function runIntruderScan() {
   }
 }
 
-function toggleFinding(id: string) {
-  expandedFinding.value = expandedFinding.value === id ? null : id
+function onFindingClick(f: IntruderFinding) {
+  selectedFinding.value = selectedFinding.value?.id === f.id ? null : f
 }
 
 function categoryLabel(c: string): string {
@@ -469,45 +470,35 @@ onUnmounted(() => {
             <button class="btn ghost" @click="runIntruderScan">Re-run</button>
           </div>
 
-          <div class="finding-list">
-            <div
-              v-for="f in intruderReport.findings"
-              :key="f.id"
-              class="finding-card"
-              :class="[f.severity, { expanded: expandedFinding === f.id }]"
-              @click="toggleFinding(f.id)"
-            >
-              <div class="fc-top">
-                <span class="sev-badge" :class="f.severity">{{ severityLabel(f.severity) }}</span>
-                <span class="cat-tag">{{ categoryLabel(f.category) }}</span>
-                <span class="fc-proc">
-                  {{ f.process }}
-                  <span class="fc-pid">PID {{ f.pid }}</span>
-                </span>
-                <span class="fc-chevron" :class="{ open: expandedFinding === f.id }">›</span>
-              </div>
-              <div class="fc-title">{{ f.title }}</div>
-              <div class="fc-desc">{{ f.description }}</div>
-
-              <div v-if="expandedFinding === f.id" class="fc-expanded">
-                <div v-if="f.remote_ip || f.local_port" class="fc-context">
-                  <span class="fc-context-label">Connection</span>
-                  <span v-if="f.remote_ip" class="mono">→ {{ f.remote_ip }}<template v-if="f.remote_port">:{{ f.remote_port }}</template></span>
-                  <span v-if="f.local_port" class="mono">Listening on :{{ f.local_port }}</span>
-                </div>
-                <div class="fc-rec">
-                  <span class="fc-rec-label">
-                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;flex-shrink:0">
-                      <circle cx="8" cy="8" r="6.5"/>
-                      <line x1="8" y1="5.5" x2="8" y2="8.5"/>
-                      <circle cx="8" cy="11" r="0.6" fill="currentColor" stroke="none"/>
-                    </svg>
-                    Recommended action
+          <div class="intruder-findings-content">
+            <div class="finding-list">
+              <div
+                v-for="f in intruderReport.findings"
+                :key="f.id"
+                class="finding-card"
+                :class="[f.severity, { selected: selectedFinding?.id === f.id }]"
+                @click="onFindingClick(f)"
+              >
+                <div class="fc-top">
+                  <span class="sev-badge" :class="f.severity">{{ severityLabel(f.severity) }}</span>
+                  <span class="cat-tag">{{ categoryLabel(f.category) }}</span>
+                  <span class="fc-proc">
+                    {{ f.process }}
+                    <span class="fc-pid">PID {{ f.pid }}</span>
                   </span>
-                  {{ f.recommendation }}
                 </div>
+                <div class="fc-title">{{ f.title }}</div>
+                <div class="fc-desc">{{ f.description }}</div>
               </div>
             </div>
+
+            <Transition name="panel">
+              <IntruderDetail
+                v-if="selectedFinding"
+                :finding="selectedFinding"
+                @close="selectedFinding = null"
+              />
+            </Transition>
           </div>
         </template>
 
@@ -1490,6 +1481,13 @@ td {
   color: var(--muted);
 }
 
+/* Findings two-column layout */
+.intruder-findings-content {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+
 /* Finding list */
 .finding-list {
   flex: 1;
@@ -1498,6 +1496,7 @@ td {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  min-width: 0;
 }
 
 .finding-card {
@@ -1509,7 +1508,8 @@ td {
   cursor: pointer;
   transition: border-color 0.15s, background 0.12s;
 }
-.finding-card:hover { background: rgba(88,166,255,0.03); }
+.finding-card:hover  { background: rgba(88,166,255,0.03); }
+.finding-card.selected { background: rgba(88,166,255,0.07); border-color: rgba(88,166,255,0.4); }
 .finding-card.critical { border-left-color: var(--red); }
 .finding-card.high     { border-left-color: var(--orange); }
 .finding-card.medium   { border-left-color: #d29922; }
@@ -1535,15 +1535,6 @@ td {
   margin-left: 4px;
 }
 
-.fc-chevron {
-  font-size: 16px;
-  color: var(--muted);
-  transition: transform 0.15s;
-  line-height: 1;
-  margin-left: 4px;
-}
-.fc-chevron.open { transform: rotate(90deg); }
-
 .fc-title {
   font-size: 13px;
   font-weight: 600;
@@ -1558,54 +1549,11 @@ td {
   line-height: 1.55;
 }
 
-.fc-expanded {
-  margin-top: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
+/* Panel slide transition */
+.panel-enter-active, .panel-leave-active {
+  transition: transform 0.2s ease, opacity 0.2s ease;
 }
-
-.fc-context {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 12px;
-}
-.fc-context-label {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--muted);
-  font-weight: 500;
-}
-.fc-ip {
-  color: var(--text);
-  font-size: 12px;
-}
-
-.fc-rec {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 10px 12px;
-  background: rgba(88,166,255,0.06);
-  border: 1px solid rgba(88,166,255,0.15);
-  border-radius: 8px;
-  font-size: 12px;
-  color: var(--text);
-  line-height: 1.55;
-}
-
-.fc-rec-label {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.07em;
-  color: var(--accent);
-}
+.panel-enter-from, .panel-leave-to { transform: translateX(100%); opacity: 0; }
 
 /* Category tag (distinct from type-tag) */
 .cat-tag {
