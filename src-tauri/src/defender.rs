@@ -1,3 +1,4 @@
+use crate::malware_check;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -198,6 +199,21 @@ fn modified_secs(path: &Path) -> Option<u64> {
         .map(|d| d.as_secs())
 }
 
+/// Checks whether a suspicious path appears as a plist string value (inside <string>…</string>).
+/// This avoids false positives from paths mentioned in comments or other non-executable contexts.
+fn plist_string_contains(content: &str, path_prefix: &str) -> bool {
+    let tag = "<string>";
+    let mut pos = 0;
+    while let Some(rel) = content[pos..].find(tag) {
+        let after_tag = pos + rel + tag.len();
+        if content[after_tag..].starts_with(path_prefix) {
+            return true;
+        }
+        pos = after_tag;
+    }
+    false
+}
+
 fn analyze_file(path: &Path, home: &Path) -> Option<ThreatItem> {
     let meta = std::fs::metadata(path).ok()?;
     if meta.is_dir() {
@@ -226,22 +242,43 @@ fn analyze_file(path: &Path, home: &Path) -> Option<ThreatItem> {
 
     if in_launch_dir && ext == "plist" {
         let content = std::fs::read_to_string(path).unwrap_or_default();
-        let suspicious = ["/tmp/", "/var/folders/", "/Users/Shared/", "Downloads/", "/."];
-        for pat in &suspicious {
-            if content.contains(pat) {
+        // Only flag if a suspicious path appears as a <string> value — avoids flagging
+        // plists that merely mention these paths in comments or log-dir keys.
+        let suspicious_prefixes: &[(&str, &str)] = &[
+            ("/tmp/", "/tmp"),
+            ("/var/folders/", "/var/folders"),
+            ("/Users/Shared/", "/Users/Shared"),
+            ("/.", "hidden path"),
+        ];
+        for &(prefix, label) in suspicious_prefixes {
+            if plist_string_contains(&content, prefix) {
                 return Some(ThreatItem {
                     path: path_str,
                     name,
                     threat_type: "suspicious_launchagent".to_string(),
                     severity: "high".to_string(),
                     reason: format!(
-                        "LaunchAgent plist references a suspicious path (\"{}\")",
-                        pat.trim_matches('/')
+                        "LaunchAgent plist executes a program from a suspicious location (\"{}\")",
+                        label
                     ),
                     size,
                     modified,
                 });
             }
+        }
+        // Also check if it references the user's Downloads folder
+        let downloads_str = home.join("Downloads").to_string_lossy().to_string() + "/";
+        if plist_string_contains(&content, &downloads_str) {
+            return Some(ThreatItem {
+                path: path_str,
+                name,
+                threat_type: "suspicious_launchagent".to_string(),
+                severity: "high".to_string(),
+                reason: "LaunchAgent plist executes a program from the Downloads folder"
+                    .to_string(),
+                size,
+                modified,
+            });
         }
         return None;
     }
@@ -306,6 +343,15 @@ fn analyze_file(path: &Path, home: &Path) -> Option<ThreatItem> {
     }
 
     None
+}
+
+/// Calls the malware database (VirusTotal + MalwareBazaar) synchronously from a blocking context.
+/// Returns the check result, which includes status "clean", "malicious", "suspicious",
+/// "unknown" (not in DB), "no_api_key", or "error".
+fn db_verify(path: &Path) -> malware_check::MalwareCheckResult {
+    let path_str = path.to_string_lossy().to_string();
+    tokio::runtime::Handle::current()
+        .block_on(malware_check::check_file_hash(&path_str))
 }
 
 fn collect_scan_dirs(scan_type: &str, custom_paths: &[String]) -> Vec<PathBuf> {
@@ -437,8 +483,53 @@ fn run_scan(
                 );
             }
 
-            if let Some(threat) = analyze_file(&path, &home) {
-                threats.push(threat);
+            if let Some(mut threat) = analyze_file(&path, &home) {
+                // LaunchAgent plist threats are content-based (not binary) — no hash to verify.
+                // All other heuristic candidates are verified against VirusTotal + MalwareBazaar
+                // before being reported, to eliminate false positives.
+                let confirmed = if threat.threat_type == "suspicious_launchagent" {
+                    true
+                } else {
+                    let check = db_verify(&path);
+                    match check.status.as_str() {
+                        "malicious" => {
+                            let family = check
+                                .malware_bazaar
+                                .as_ref()
+                                .and_then(|b| b.signature.as_deref())
+                                .map(|s| format!(" ({})", s))
+                                .unwrap_or_default();
+                            threat.severity = "critical".to_string();
+                            threat.reason = format!(
+                                "{} — confirmed malicious{} by {}/{} antivirus engines",
+                                threat.reason,
+                                family,
+                                check.malicious,
+                                check.total_engines
+                            );
+                            true
+                        }
+                        "suspicious" => {
+                            threat.reason = format!(
+                                "{} — flagged suspicious by {}/{} antivirus engines",
+                                threat.reason, check.suspicious, check.total_engines
+                            );
+                            true
+                        }
+                        // Database confirms the file is clean — discard the heuristic match
+                        "clean" => false,
+                        // Not in any database — absence of a record is not confirmation of malice
+                        "unknown" => false,
+                        // Cannot verify without an API key — suppress rather than false-positive
+                        "no_api_key" => false,
+                        // Network error or unexpected response — cannot confirm, suppress
+                        _ => false,
+                    }
+                };
+
+                if confirmed {
+                    threats.push(threat);
+                }
             }
         }
     }
