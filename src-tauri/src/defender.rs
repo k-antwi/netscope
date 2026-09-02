@@ -518,25 +518,12 @@ fn run_scan(
                         }
                         // Database confirms the file is clean — discard the heuristic match
                         "clean" => false,
-                        "unknown" => {
-                            // Not in any database yet; keep flag but note it cannot be confirmed
-                            threat.reason = format!(
-                                "{} — not found in virus databases (unrecognised file)",
-                                threat.reason
-                            );
-                            true
-                        }
-                        "no_api_key" => {
-                            threat.reason = format!(
-                                "{} — configure VIRUSTOTAL_API_KEY to verify against malware databases",
-                                threat.reason
-                            );
-                            true
-                        }
-                        _ => {
-                            // Network error or unexpected response — keep heuristic finding
-                            true
-                        }
+                        // Not in any database — absence of a record is not confirmation of malice
+                        "unknown" => false,
+                        // Cannot verify without an API key — suppress rather than false-positive
+                        "no_api_key" => false,
+                        // Network error or unexpected response — cannot confirm, suppress
+                        _ => false,
                     }
                 };
 
