@@ -573,6 +573,51 @@ pub async fn cancel_defender_scan(state: State<'_, DefenderState>) -> Result<(),
     Ok(())
 }
 
+/// Returns true if the app has been granted Full Disk Access in
+/// System Settings → Privacy & Security → Full Disk Access.
+/// The TCC database itself is only readable with FDA, so a successful
+/// metadata read is a reliable proxy.
+#[tauri::command]
+pub fn check_full_disk_access() -> bool {
+    std::fs::metadata("/Library/Application Support/com.apple.TCC/TCC.db").is_ok()
+}
+
+/// Opens System Settings at the Full Disk Access pane.
+#[tauri::command]
+pub fn open_full_disk_access_settings() -> Result<(), String> {
+    std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Pre-touches the home directory and every macOS-protected subfolder so that
+/// all TCC permission dialogs appear before the scan starts rather than
+/// interrupting it mid-run.
+#[tauri::command]
+pub async fn request_scan_permissions() -> Result<(), String> {
+    let home = home_dir();
+    let dirs = [
+        home.clone(),
+        home.join("Downloads"),
+        home.join("Documents"),
+        home.join("Desktop"),
+        home.join("Library").join("LaunchAgents"),
+        PathBuf::from("/Library/LaunchAgents"),
+        PathBuf::from("/Library/LaunchDaemons"),
+    ];
+    tokio::task::spawn_blocking(move || {
+        for dir in &dirs {
+            if dir.exists() {
+                let _ = std::fs::read_dir(dir);
+            }
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn neutralize_threat(path: String) -> Result<String, String> {
     let src = PathBuf::from(&path);

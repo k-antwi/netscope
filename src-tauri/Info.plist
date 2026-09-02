@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>NetScope scans your Downloads folder to detect malware, suspicious scripts, and executable files that may pose a security risk.</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>NetScope scans your Documents folder to detect threats and suspicious files that may pose a security risk.</string>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>NetScope scans your Desktop to detect threats and suspicious files that may pose a security risk.</string>
+    <key>NSRemovableVolumesUsageDescription</key>
+    <string>NetScope can scan removable drives for malware and security threats.</string>
+    <key>NSUserNotificationUsageDescription</key>
+    <string>NetScope uses notifications to alert you when a threat scan completes or a security issue is detected.</string>
+</dict>
+</plist>

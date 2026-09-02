@@ -167,6 +167,12 @@ async function startScan(type: ScanType, paths: string[] = []) {
   neutralizing.value = new Set()
   neutralizeErrors.value = new Map()
 
+  // Pre-warm macOS TCC permissions for all protected directories so the
+  // system dialogs appear before the scan starts, not mid-run.
+  if (type === 'full' || type === 'quick') {
+    await invoke('request_scan_permissions').catch(() => {})
+  }
+
   if (unlisten) { unlisten(); unlisten = null }
   unlisten = await listen<DefenderProgress>('defender-progress', e => {
     progress.value = e.payload
