@@ -1187,7 +1187,7 @@ pub fn run() {
             tauri::async_runtime::spawn(start_ws_server(handle));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_connections, investigate_ip, get_inbound, investigate_service, get_issues, get_system_metrics, scan_files, cancel_file_scan, delete_files, get_file_details, reveal_in_finder, check_malware, check_cves, scan_for_threats, cancel_defender_scan, neutralize_threat, request_scan_permissions, save_defender_scan, load_last_defender_scan, save_security_report, load_security_reports, spot_intruder, kill_process, run_command])
+        .invoke_handler(tauri::generate_handler![get_connections, investigate_ip, get_inbound, investigate_service, get_issues, get_system_metrics, scan_files, cancel_file_scan, delete_files, get_file_details, reveal_in_finder, check_malware, check_cves, scan_for_threats, cancel_defender_scan, neutralize_threat, request_scan_permissions, check_full_disk_access, open_full_disk_access_settings, save_defender_scan, load_last_defender_scan, save_security_report, load_security_reports, spot_intruder, kill_process, run_command])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -25,6 +25,10 @@ const storedTimestamp = ref<number | null>(null)
 const storedUnfixedCount = ref(0)
 const lastStoredResult = ref<DefenderScanResult | null>(null)
 
+// Full Disk Access
+const hasFullDiskAccess = ref<boolean | null>(null)
+const fdaDismissed = ref(false)
+
 // Reports pane
 const activePane = ref<DefenderPane>('scanner')
 const reports = ref<SecurityReport[]>([])
@@ -135,6 +139,17 @@ function intruderSeverityCount(sev: string): number {
   return intruderReport.value?.findings.filter((f: IntruderFinding) => f.severity === sev).length ?? 0
 }
 
+async function refreshFdaStatus() {
+  hasFullDiskAccess.value = await invoke<boolean>('check_full_disk_access').catch(() => false)
+}
+
+async function openFdaSettings() {
+  await invoke('open_full_disk_access_settings').catch(() => {})
+  // Re-check after a short delay so the banner updates if the user grants access
+  setTimeout(refreshFdaStatus, 3000)
+  setTimeout(refreshFdaStatus, 8000)
+}
+
 onMounted(async () => {
   try {
     const stored = await invoke<StoredScan | null>('load_last_defender_scan')
@@ -148,6 +163,8 @@ onMounted(async () => {
       ).length
     }
   } catch { /* first launch or corrupted file — silently ignore */ }
+
+  await refreshFdaStatus()
 })
 
 function checkNow() {
@@ -694,6 +711,37 @@ onUnmounted(() => {
           </svg>
           <span class="last-scan-label">{{ lastScanText() }}</span>
         </div>
+
+        <!-- Full Disk Access banner -->
+        <Transition name="fda-banner">
+          <div
+            v-if="hasFullDiskAccess === false && !fdaDismissed"
+            class="fda-banner"
+          >
+            <div class="fda-icon">
+              <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="10" cy="10" r="8.5" stroke="var(--orange)"/>
+                <line x1="10" y1="6.5" x2="10" y2="11" stroke="var(--orange)"/>
+                <circle cx="10" cy="13.5" r="0.8" fill="var(--orange)" stroke="none"/>
+              </svg>
+            </div>
+            <div class="fda-body">
+              <div class="fda-title">Full Disk Access not granted</div>
+              <div class="fda-desc">
+                Without Full Disk Access, scans skip protected folders like
+                Documents and Desktop, and macOS will prompt separately for each
+                directory. Grant access once in System Settings for complete,
+                uninterrupted scans.
+              </div>
+            </div>
+            <div class="fda-actions">
+              <button class="btn primary fda-btn" @click="openFdaSettings">
+                Open System Settings
+              </button>
+              <button class="btn ghost fda-dismiss" @click="fdaDismissed = true" title="Dismiss">✕</button>
+            </div>
+          </div>
+        </Transition>
 
         <div class="scan-cards">
           <!-- Full Scan -->
@@ -1614,6 +1662,70 @@ td {
   transition: transform 0.2s ease, opacity 0.2s ease;
 }
 .panel-enter-from, .panel-leave-to { transform: translateX(100%); opacity: 0; }
+
+/* ── Full Disk Access banner ── */
+.fda-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 14px 20px;
+  background: rgba(210, 153, 34, 0.08);
+  border: 1px solid rgba(210, 153, 34, 0.28);
+  border-radius: 12px;
+  width: 100%;
+  max-width: 680px;
+  text-align: left;
+}
+
+.fda-icon {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  margin-top: 1px;
+}
+.fda-icon svg { width: 20px; height: 20px; }
+
+.fda-body { flex: 1; min-width: 0; }
+
+.fda-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--orange);
+  margin-bottom: 4px;
+}
+
+.fda-desc {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.fda-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.fda-btn {
+  white-space: nowrap;
+  font-size: 12px;
+  padding: 6px 12px;
+}
+
+.fda-dismiss {
+  padding: 5px 8px;
+  font-size: 11px;
+  color: var(--muted);
+  border-color: transparent;
+  background: transparent;
+}
+.fda-dismiss:hover { background: var(--surface-2); border-color: var(--border); }
+
+.fda-banner-enter-active,
+.fda-banner-leave-active { transition: opacity 0.2s, transform 0.2s; }
+.fda-banner-enter-from,
+.fda-banner-leave-to { opacity: 0; transform: translateY(-6px); }
 
 /* Category tag (distinct from type-tag) */
 .cat-tag {
