@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import type { SystemMetrics, StoredScan } from '../types'
+import type { SystemMetrics, StoredScan, DiskVolume } from '../types'
 import { useOutbound } from '../composables/useOutbound'
 import { useInbound } from '../composables/useInbound'
 import { useAlerts } from '../composables/useAlerts'
@@ -44,7 +44,37 @@ async function fetchMetrics() {
   } catch { /* ignore errors silently */ }
 }
 
-onMounted(() => { fetchMetrics(); fetchDefenderScan(); sysTimer = setInterval(fetchMetrics, 3000) })
+// --- Disk info ---
+const diskVolumes = ref<DiskVolume[]>([])
+const diskLoading = ref(true)
+
+async function fetchDiskInfo() {
+  diskLoading.value = true
+  try {
+    diskVolumes.value = await invoke<DiskVolume[]>('get_disk_info')
+  } catch { /* ignore */ } finally {
+    diskLoading.value = false
+  }
+}
+
+function fmtBytes(bytes: number): string {
+  if (bytes >= 1e12) return `${(bytes / 1e12).toFixed(2)} TB`
+  if (bytes >= 1e9)  return `${(bytes / 1e9).toFixed(2)} GB`
+  if (bytes >= 1e6)  return `${(bytes / 1e6).toFixed(1)} MB`
+  return `${Math.round(bytes / 1e3)} KB`
+}
+
+function usedWidth(vol: DiskVolume): string {
+  if (!vol.total_bytes) return '0%'
+  return `${((vol.used_bytes / vol.total_bytes) * 100).toFixed(2)}%`
+}
+
+function segmentWidth(vol: DiskVolume, seg: { bytes: number }): string {
+  if (!vol.used_bytes) return '0%'
+  return `${((seg.bytes / vol.used_bytes) * 100).toFixed(2)}%`
+}
+
+onMounted(() => { fetchMetrics(); fetchDefenderScan(); fetchDiskInfo(); sysTimer = setInterval(fetchMetrics, 3000) })
 onUnmounted(() => { if (sysTimer) clearInterval(sysTimer) })
 
 // --- System metric accessors ---
@@ -381,6 +411,65 @@ function sevColor(sev: string) {
         </div>
       </div>
 
+    </div>
+
+    <!-- ── Row 2b: Storage ── -->
+    <div class="storage-section">
+      <div v-if="diskLoading" class="card storage-card storage-loading">
+        <span class="storage-loading-label">Loading storage…</span>
+      </div>
+      <div
+        v-for="vol in diskVolumes"
+        :key="vol.mount"
+        class="card storage-card"
+      >
+        <div class="storage-header">
+          <div class="storage-vol-name">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;opacity:.6">
+              <rect x="1" y="4" width="14" height="8" rx="2"/>
+              <circle cx="12.5" cy="8" r="1" fill="currentColor" stroke="none"/>
+            </svg>
+            {{ vol.name }}
+          </div>
+          <div class="storage-usage-label">
+            {{ fmtBytes(vol.used_bytes) }} of {{ fmtBytes(vol.total_bytes) }} used
+          </div>
+        </div>
+
+        <!-- Segmented bar -->
+        <div class="storage-bar-wrap">
+          <div class="storage-bar">
+            <div class="storage-used-block" :style="{ width: usedWidth(vol) }">
+              <div
+                v-for="seg in vol.segments"
+                :key="seg.label"
+                class="storage-seg"
+                :style="{ width: segmentWidth(vol, seg), background: seg.color }"
+                :title="`${seg.label}: ${fmtBytes(seg.bytes)}`"
+              />
+            </div>
+            <div class="storage-seg storage-free" title="Free" />
+          </div>
+        </div>
+
+        <!-- Legend -->
+        <div class="storage-legend">
+          <div
+            v-for="seg in vol.segments"
+            :key="seg.label"
+            class="legend-item"
+          >
+            <span class="legend-dot" :style="{ background: seg.color }"/>
+            <span class="legend-label">{{ seg.label }}</span>
+            <span class="legend-size">{{ fmtBytes(seg.bytes) }}</span>
+          </div>
+          <div class="legend-item">
+            <span class="legend-dot legend-dot-free"/>
+            <span class="legend-label">Free</span>
+            <span class="legend-size">{{ fmtBytes(vol.free_bytes) }}</span>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- ── Row 3: Details ── -->
@@ -910,5 +999,123 @@ function sevColor(sev: string) {
   text-align: center;
   padding: 20px 0;
   opacity: 0.6;
+}
+
+/* ── Storage section ── */
+.storage-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.storage-card {
+  padding: 16px 20px 14px;
+}
+
+.storage-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 72px;
+}
+
+.storage-loading-label {
+  font-size: 12px;
+  color: var(--muted);
+  opacity: 0.6;
+}
+
+.storage-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.storage-vol-name {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.storage-usage-label {
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Bar */
+.storage-bar-wrap {
+  margin-bottom: 12px;
+}
+
+.storage-bar {
+  display: flex;
+  height: 14px;
+  border-radius: 7px;
+  overflow: hidden;
+  background: var(--surface-2);
+  gap: 2px;
+}
+
+.storage-used-block {
+  display: flex;
+  gap: 1.5px;
+  flex-shrink: 0;
+  overflow: hidden;
+  min-width: 4px;
+}
+
+.storage-seg {
+  flex-shrink: 0;
+  min-width: 2px;
+  transition: width 0.5s ease;
+}
+
+.storage-free {
+  background: rgba(139, 148, 158, 0.18);
+  flex: 1;
+}
+
+/* Legend */
+.storage-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.legend-dot-free {
+  background: rgba(139, 148, 158, 0.35);
+  border: 1px solid rgba(139, 148, 158, 0.4);
+}
+
+.legend-label {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.legend-size {
+  font-size: 11px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
 }
 </style>

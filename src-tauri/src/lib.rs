@@ -1144,6 +1144,141 @@ async fn spot_intruder() -> Result<IntruderReport, String> {
     })
 }
 
+// ── Disk Info ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DiskSegment {
+    pub label: String,
+    pub bytes: u64,
+    pub color: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DiskVolume {
+    pub name: String,
+    pub mount: String,
+    pub total_bytes: u64,
+    pub used_bytes: u64,
+    pub free_bytes: u64,
+    pub segments: Vec<DiskSegment>,
+}
+
+fn parse_du_kb(s: &str) -> u64 {
+    s.split_whitespace()
+        .next()
+        .and_then(|t| t.parse::<u64>().ok())
+        .unwrap_or(0)
+        .saturating_mul(1024)
+}
+
+/// Parses `df -k` output into (total_bytes, used_bytes, free_bytes).
+fn parse_df_line(line: &str) -> Option<(u64, u64, u64)> {
+    let p: Vec<&str> = line.split_whitespace().collect();
+    if p.len() < 4 { return None; }
+    let total = p[1].parse::<u64>().ok()?.saturating_mul(1024);
+    let used  = p[2].parse::<u64>().ok()?.saturating_mul(1024);
+    let free  = p[3].parse::<u64>().ok()?.saturating_mul(1024);
+    Some((total, used, free))
+}
+
+#[tauri::command]
+async fn get_disk_info() -> Result<Vec<DiskVolume>, String> {
+    use tokio::time::{timeout, Duration};
+
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+
+    // Root volume: name + df stats (both fast)
+    let (root_name_raw, root_df_raw) = tokio::join!(
+        shell_async(
+            "diskutil info / 2>/dev/null | awk -F': +' '/Volume Name/{print $2}' | xargs"
+                .to_string()
+        ),
+        shell_async("df -k / 2>/dev/null | tail -1".to_string()),
+    );
+
+    let root_name = {
+        let n = root_name_raw.trim();
+        if n.is_empty() { "Macintosh HD".to_string() } else { n.to_string() }
+    };
+
+    let (total_bytes, _, free_bytes) =
+        parse_df_line(&root_df_raw).unwrap_or((0, 0, 0));
+    // On macOS APFS, df's "Used" column only covers the sealed System volume.
+    // total and free are container-level, so derive used from those instead.
+    let used_bytes = total_bytes.saturating_sub(free_bytes);
+
+    // Key user directories to measure (label, path, hex colour)
+    let seg_spec: Vec<(&'static str, String, &'static str)> = vec![
+        ("Documents", format!("{home}/Documents"), "#f85149"),
+        ("Downloads", format!("{home}/Downloads"), "#f0883e"),
+        ("Desktop",   format!("{home}/Desktop"),   "#e3b341"),
+        ("Library",   format!("{home}/Library"),   "#a371f7"),
+        ("Developer", format!("{home}/Developer"), "#3fb950"),
+    ];
+
+    // Run all `du -sk` with a 10-second budget per directory
+    let mut handles = Vec::new();
+    for (label, path, color) in seg_spec {
+        let cmd = format!("du -sk '{path}' 2>/dev/null | cut -f1");
+        handles.push((label, color, tokio::spawn(shell_async(cmd))));
+    }
+
+    let mut segments: Vec<DiskSegment> = Vec::new();
+    let mut measured: u64 = 0;
+
+    for (label, color, h) in handles {
+        let raw = timeout(Duration::from_secs(10), async { h.await.unwrap_or_default() })
+            .await
+            .unwrap_or_default();
+        let bytes = parse_du_kb(&raw);
+        if bytes > 0 {
+            measured += bytes;
+            segments.push(DiskSegment { label: label.to_string(), bytes, color: color.to_string() });
+        }
+    }
+
+    // Anything used but not accounted for by the above directories
+    let other = used_bytes.saturating_sub(measured);
+    if other > 0 {
+        segments.push(DiskSegment {
+            label: "Other".to_string(),
+            bytes: other,
+            color: "#8b949e".to_string(),
+        });
+    }
+
+    let mut volumes = vec![DiskVolume {
+        name: root_name,
+        mount: "/".to_string(),
+        total_bytes,
+        used_bytes,
+        free_bytes,
+        segments,
+    }];
+
+    // Detect external / additional volumes under /Volumes
+    let vol_list = shell_async("df -k 2>/dev/null | awk '$NF ~ /^\\/Volumes\\//{print}'".to_string()).await;
+    for line in vol_list.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 6 { continue; }
+        let mount = parts[parts.len() - 1].to_string();
+        let (t, u, f) = match parse_df_line(line) { Some(v) => v, None => continue };
+        let vol_name = mount.trim_start_matches("/Volumes/").to_string();
+        volumes.push(DiskVolume {
+            name: vol_name,
+            mount,
+            total_bytes: t,
+            used_bytes: u,
+            free_bytes: f,
+            segments: vec![
+                DiskSegment { label: "Used".to_string(), bytes: u, color: "#58a6ff".to_string() },
+            ],
+        });
+    }
+
+    Ok(volumes)
+}
+
 async fn start_ws_server(app_handle: tauri::AppHandle) {
     let listener = match tokio::net::TcpListener::bind("127.0.0.1:9922").await {
         Ok(l) => l,
@@ -1187,7 +1322,7 @@ pub fn run() {
             tauri::async_runtime::spawn(start_ws_server(handle));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_connections, investigate_ip, get_inbound, investigate_service, get_issues, get_system_metrics, scan_files, cancel_file_scan, delete_files, get_file_details, reveal_in_finder, check_malware, check_cves, scan_for_threats, cancel_defender_scan, neutralize_threat, request_scan_permissions, check_full_disk_access, open_full_disk_access_settings, save_defender_scan, load_last_defender_scan, save_security_report, load_security_reports, spot_intruder, kill_process, run_command])
+        .invoke_handler(tauri::generate_handler![get_connections, investigate_ip, get_inbound, investigate_service, get_issues, get_system_metrics, get_disk_info, scan_files, cancel_file_scan, delete_files, get_file_details, reveal_in_finder, check_malware, check_cves, scan_for_threats, cancel_defender_scan, neutralize_threat, request_scan_permissions, check_full_disk_access, open_full_disk_access_settings, save_defender_scan, load_last_defender_scan, save_security_report, load_security_reports, spot_intruder, kill_process, run_command])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

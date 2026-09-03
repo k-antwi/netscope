@@ -252,6 +252,21 @@ export interface IntruderReport {
   elapsed_ms: number
 }
 
+export interface DiskSegment {
+  label: string
+  bytes: number
+  color: string
+}
+
+export interface DiskVolume {
+  name: string
+  mount: string
+  total_bytes: number
+  used_bytes: number
+  free_bytes: number
+  segments: DiskSegment[]
+}
+
 export const PORT_LABELS: Record<number, string> = {
   21: 'FTP',
   22: 'SSH',
